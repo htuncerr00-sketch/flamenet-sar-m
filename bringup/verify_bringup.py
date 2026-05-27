@@ -17,14 +17,23 @@ Five verification phases:
   P4  Wire integrity: 0 CRC errors, ≥99% delivery over first 30 s
   P5  Soak: configurable duration (default 10 min); all P2-P4 criteria maintained
 
+Extended analysis (added in production hardening pass):
+  • Jitter analysis:  Welford's online mean/variance of ts_us inter-frame deltas
+  • Sensor freeze:    Sliding-window freeze detection (200-frame window)
+  • Throughput:       UART byte-rate and utilisation tracking
+  • Per-minute:       Frame count per minute for trend detection
+  • Reports:          Markdown + JSON written to --report-dir
+
 Usage:
   python verify_bringup.py --port /dev/ttyUSB1 --soak-minutes 10
   python verify_bringup.py --port COM3 --soak-minutes 1   # quick smoke test
   python verify_bringup.py --port /dev/ttyUSB1 --skip-soak
+  python verify_bringup.py --port /dev/ttyUSB1 --report-dir ./reports
 
 Outputs:
   • Live terminal progress (colour if TTY)
-  • JSON results: bringup_results_YYYYMMDD_HHMMSS.json  (in ./bringup/)
+  • JSON results: <report-dir>/bringup_results_YYYYMMDD_HHMMSS.json
+  • Markdown report: <report-dir>/bringup_report_YYYYMMDD_HHMMSS.md
 """
 from __future__ import annotations
 
@@ -36,6 +45,7 @@ import os
 import struct
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
@@ -74,18 +84,20 @@ F_THERMAL_SHUT   = 1 << 13
 F_WATCHDOG_RST   = 1 << 14
 
 # ── pass/fail thresholds ──────────────────────────────────────────────
-# Adjust if your board's operating environment differs.
-TEMP_K_MIN       = 273.15    # 0 °C
-TEMP_K_MAX       = 348.15    # 75 °C  (above ambient, below shutdown 373.15 K)
-TEMP_K_SHUTDOWN  = 373.15    # safety threshold — flag if frame reaches this
-CURRENT_ABS_MAX  = 45.0      # safety threshold A
-CURRENT_ABS_MAX_BENCH = 5.0  # expected bench idle current (will just check sign)
-VIB_MAX_G        = 2.0       # ±2 g range of MPU6050
-VIB_NOISE_FLOOR  = 0.005     # g — idle noise should be below this after warmup
-DELIVERY_TARGET  = 0.99      # 99% frame delivery
-SENSOR_UP_TARGET = 0.98      # 98% uptime for each sensor flag
-PHASE4_WINDOW_S  = 30.0      # seconds of data to evaluate P4 delivery
-FIRST_FRAME_TIMEOUT_S = 10.0 # seconds to wait for the first frame
+TEMP_K_MIN            = 273.15    # 0 °C
+TEMP_K_MAX            = 348.15    # 75 °C (above ambient, below shutdown 373.15 K)
+TEMP_K_SHUTDOWN       = 373.15    # safety threshold
+CURRENT_ABS_MAX       = 45.0      # safety threshold A
+VIB_MAX_G             = 2.0       # ±2 g range of MPU6050
+DELIVERY_TARGET       = 0.99      # 99% frame delivery
+SENSOR_UP_TARGET      = 0.98      # 98% uptime per sensor flag
+PHASE4_WINDOW_S       = 30.0      # seconds for P4 evaluation
+FIRST_FRAME_TIMEOUT_S = 10.0      # seconds to wait for first frame
+JITTER_LATE_THRESH_US = 1500      # µs — inter-frame delta flagged as late
+JITTER_BURST_THRESH_US = 500      # µs — inter-frame delta flagged as burst
+FREEZE_WINDOW_FRAMES  = 200       # frames for freeze detection (~200 ms @ 1 kHz)
+BAUD_RATE             = 921600    # bits/s
+BITS_PER_BYTE         = 10        # 8N1: start + 8 data + stop
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -167,10 +179,8 @@ class FrameParser:
         frames: list[TelemetryFrame] = []
 
         while True:
-            # Scan for magic
             idx = self._buf.find(MAGIC)
             if idx == -1:
-                # No magic anywhere; keep last byte in case it's 0xAA
                 self.n_sync_drops += max(0, len(self._buf) - 1)
                 self._buf = self._buf[-1:]
                 break
@@ -179,7 +189,6 @@ class FrameParser:
                 self.n_sync_drops += idx
                 del self._buf[:idx]
 
-            # Need full frame
             if len(self._buf) < WIRE_LEN:
                 break
 
@@ -192,7 +201,6 @@ class FrameParser:
 
             if crc_actual != crc_expected:
                 self.n_crc_errors += 1
-                # Put back all but the magic bytes and re-search
                 self._buf[0:0] = frame_bytes[2:]
                 continue
 
@@ -201,6 +209,181 @@ class FrameParser:
             frames.append(frame)
 
         return frames
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Jitter analyser — Welford's online algorithm
+# ═══════════════════════════════════════════════════════════════════════
+
+class JitterAnalyzer:
+    """Online mean/variance of ts_us inter-frame deltas using Welford's algorithm.
+
+    Expected inter-frame delta: 1000 µs (1 kHz).
+    Tracks late frames (>1.5 ms) and burst frames (<0.5 ms) separately.
+    Skips deltas that suggest a wrap-around or stale ts_us (>50 ms gap).
+    """
+
+    def __init__(self) -> None:
+        self._last_ts_us: int = -1
+        self.n: int = 0
+        self._mean: float = 0.0
+        self._M2: float = 0.0
+        self.min_us: float = float("inf")
+        self.max_us: float = float("-inf")
+        self.n_late: int = 0     # delta > JITTER_LATE_THRESH_US
+        self.n_burst: int = 0    # delta < JITTER_BURST_THRESH_US
+
+    def update(self, ts_us: int) -> None:
+        if self._last_ts_us < 0:
+            self._last_ts_us = ts_us
+            return
+
+        delta = ts_us - self._last_ts_us
+        self._last_ts_us = ts_us
+
+        # Ignore implausible deltas (wrap-around or firmware reboot gap)
+        if delta <= 0 or delta > 50_000:
+            return
+
+        self.n += 1
+        delta_f = float(delta)
+        old_mean = self._mean
+        self._mean += (delta_f - self._mean) / self.n
+        self._M2 += (delta_f - old_mean) * (delta_f - self._mean)
+
+        if delta_f < self.min_us:
+            self.min_us = delta_f
+        if delta_f > self.max_us:
+            self.max_us = delta_f
+
+        if delta > JITTER_LATE_THRESH_US:
+            self.n_late += 1
+        if delta < JITTER_BURST_THRESH_US:
+            self.n_burst += 1
+
+    @property
+    def mean_us(self) -> float:
+        return self._mean
+
+    @property
+    def variance_us2(self) -> float:
+        return self._M2 / (self.n - 1) if self.n > 1 else 0.0
+
+    @property
+    def stddev_us(self) -> float:
+        return math.sqrt(self.variance_us2)
+
+    def jitter_ok(self) -> bool:
+        """True if mean is within ±5% of 1000 µs and stddev < 100 µs."""
+        if self.n < 10:
+            return True  # not enough data to judge
+        return (abs(self.mean_us - 1000.0) < 50.0) and (self.stddev_us < 100.0)
+
+    def as_dict(self) -> dict:
+        return {
+            "n_deltas": self.n,
+            "mean_us": round(self.mean_us, 2),
+            "stddev_us": round(self.stddev_us, 2),
+            "min_us": round(self.min_us, 2) if self.n > 0 else None,
+            "max_us": round(self.max_us, 2) if self.n > 0 else None,
+            "n_late_gt1500us": self.n_late,
+            "n_burst_lt500us": self.n_burst,
+            "late_pct": round(100.0 * self.n_late / self.n, 3) if self.n > 0 else 0.0,
+            "jitter_ok": self.jitter_ok(),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Sensor freeze detector — sliding window
+# ═══════════════════════════════════════════════════════════════════════
+
+class SensorFreezeDetector:
+    """Sliding-window sensor freeze detection.
+
+    A field is "frozen" if it has not changed across FREEZE_WINDOW_FRAMES
+    consecutive frames.  This catches LKG propagation without a flag update,
+    wiring faults, or sensor address collisions.
+
+    Note: LKG is expected when a sensor's *flag* bit is clear.  The freeze
+    detector fires independently of flag bits — flag-clear freeze is expected;
+    flag-set freeze is a fault.
+    """
+
+    _FIELDS = ("temp_K", "current_A", "vib_x", "vib_y", "vib_z")
+
+    def __init__(self) -> None:
+        self._windows: dict[str, deque] = {
+            k: deque(maxlen=FREEZE_WINDOW_FRAMES) for k in self._FIELDS
+        }
+        self.freeze_counts: dict[str, int] = {k: 0 for k in self._FIELDS}
+        self._freeze_active: dict[str, bool] = {k: False for k in self._FIELDS}
+        self.total_freeze_events: int = 0
+
+    def update(self, f: TelemetryFrame) -> list[str]:
+        """Returns list of currently frozen fields (empty if none)."""
+        frozen = []
+        for fname in self._FIELDS:
+            window = self._windows[fname]
+            val = getattr(f, fname)
+            window.append(val)
+            if len(window) == FREEZE_WINDOW_FRAMES:
+                # All values identical in window?
+                first = window[0]
+                is_frozen = all(v == first for v in window)
+                if is_frozen and not self._freeze_active[fname]:
+                    self.freeze_counts[fname] += 1
+                    self.total_freeze_events += 1
+                    self._freeze_active[fname] = True
+                elif not is_frozen:
+                    self._freeze_active[fname] = False
+                if is_frozen:
+                    frozen.append(fname)
+        return frozen
+
+    def as_dict(self) -> dict:
+        return {
+            "total_freeze_events": self.total_freeze_events,
+            "by_field": dict(self.freeze_counts),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Throughput tracker
+# ═══════════════════════════════════════════════════════════════════════
+
+class ThroughputTracker:
+    """Tracks raw UART byte rate and link utilisation."""
+
+    def __init__(self) -> None:
+        self.total_bytes: int = 0
+        self._t_start: float = time.monotonic()
+
+    def add_bytes(self, n: int) -> None:
+        self.total_bytes += n
+
+    @property
+    def elapsed_s(self) -> float:
+        return time.monotonic() - self._t_start
+
+    @property
+    def bytes_per_sec(self) -> float:
+        el = self.elapsed_s
+        return self.total_bytes / el if el > 0 else 0.0
+
+    @property
+    def utilization_pct(self) -> float:
+        bits_per_sec = self.bytes_per_sec * BITS_PER_BYTE
+        return 100.0 * bits_per_sec / BAUD_RATE
+
+    def as_dict(self) -> dict:
+        return {
+            "total_bytes": self.total_bytes,
+            "elapsed_s": round(self.elapsed_s, 1),
+            "bytes_per_sec": round(self.bytes_per_sec, 1),
+            "utilization_pct": round(self.utilization_pct, 2),
+            "expected_bytes_per_sec": 66_000,   # 66 B × 1 kHz
+            "expected_utilization_pct": 71.6,
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -236,7 +419,12 @@ class SoakStats:
     _last_seq:        int = field(default=-1, repr=False)
     elapsed_s:        float = 0.0
 
-    def ingest(self, f: TelemetryFrame) -> None:
+    # per-minute frame count (bucket per 60 s)
+    per_minute_frames: list = field(default_factory=list, repr=False)
+    _minute_start_t:   float = field(default=0.0, repr=False)
+    _minute_count:     int = field(default=0, repr=False)
+
+    def ingest(self, f: TelemetryFrame, wall_t: float = 0.0) -> None:
         self.n_frames += 1
 
         if not f.is_finite():
@@ -248,29 +436,44 @@ class SoakStats:
                 self.n_seq_jumps += 1
         self._last_seq = f.seq
 
-        if f.flags & F_INA226_OK:  self.n_ina226_ok  += 1
-        if f.flags & F_IMU_OK:     self.n_imu_ok     += 1
-        if f.flags & F_THERMAL_OK: self.n_thermal_ok += 1
-        if f.flags & F_SAFE_HALT:  self.n_safe_halt  += 1
-        if f.flags & F_BROWNOUT:   self.n_brownout   += 1
+        if f.flags & F_INA226_OK:    self.n_ina226_ok    += 1
+        if f.flags & F_IMU_OK:       self.n_imu_ok       += 1
+        if f.flags & F_THERMAL_OK:   self.n_thermal_ok   += 1
+        if f.flags & F_SAFE_HALT:    self.n_safe_halt    += 1
+        if f.flags & F_BROWNOUT:     self.n_brownout     += 1
         if f.flags & F_WATCHDOG_RST: self.n_watchdog_rst += 1
         if f.flags & F_THERMAL_SHUT: self.n_thermal_shut += 1
 
         if math.isfinite(f.temp_K):
-            self.temp_K_min = min(self.temp_K_min, f.temp_K)
-            self.temp_K_max = max(self.temp_K_max, f.temp_K)
+            if f.temp_K < self.temp_K_min: self.temp_K_min = f.temp_K
+            if f.temp_K > self.temp_K_max: self.temp_K_max = f.temp_K
             self.temp_K_sum += f.temp_K
 
         if math.isfinite(f.current_A):
-            self.current_A_min = min(self.current_A_min, f.current_A)
-            self.current_A_max = max(self.current_A_max, f.current_A)
+            if f.current_A < self.current_A_min: self.current_A_min = f.current_A
+            if f.current_A > self.current_A_max: self.current_A_max = f.current_A
 
         vib_rms = math.sqrt(f.vib_x**2 + f.vib_y**2 + f.vib_z**2)
-        if math.isfinite(vib_rms):
-            self.vib_rms_max = max(self.vib_rms_max, vib_rms)
+        if math.isfinite(vib_rms) and vib_rms > self.vib_rms_max:
+            self.vib_rms_max = vib_rms
 
-        if math.isfinite(f.quality):
-            self.quality_min = min(self.quality_min, f.quality)
+        if math.isfinite(f.quality) and f.quality < self.quality_min:
+            self.quality_min = f.quality
+
+        # per-minute bucketing
+        if wall_t > 0:
+            if self._minute_start_t == 0.0:
+                self._minute_start_t = wall_t
+            if wall_t - self._minute_start_t >= 60.0:
+                self.per_minute_frames.append(self._minute_count)
+                self._minute_count = 0
+                self._minute_start_t = wall_t
+            self._minute_count += 1
+
+    def flush_last_minute(self) -> None:
+        if self._minute_count > 0:
+            self.per_minute_frames.append(self._minute_count)
+            self._minute_count = 0
 
     @property
     def temp_K_mean(self) -> float:
@@ -291,6 +494,8 @@ class SoakStats:
     def as_dict(self) -> dict:
         d = asdict(self)
         d.pop("_last_seq", None)
+        d.pop("_minute_start_t", None)
+        d.pop("_minute_count", None)
         d["temp_K_mean"]      = round(self.temp_K_mean, 3)
         d["ina226_ok_pct"]    = round(self.ina226_ok_pct, 2)
         d["imu_ok_pct"]       = round(self.imu_ok_pct, 2)
@@ -299,18 +504,230 @@ class SoakStats:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Main verifier
+# Markdown report generator
+# ═══════════════════════════════════════════════════════════════════════
+
+def _md_pass(ok: bool) -> str:
+    return "✅ PASS" if ok else "❌ FAIL"
+
+
+def generate_markdown_report(results: dict, ts_str: str) -> str:
+    """Generate a human-readable markdown bring-up report from results dict."""
+    lines = []
+    a = lines.append
+
+    a("# First Silicon Bring-Up Report")
+    a("")
+    a(f"**Generated:** {results.get('timestamp', ts_str)}  ")
+    a(f"**Port:** `{results.get('port', '?')}` @ {results.get('baud', '?')} baud  ")
+    a(f"**Evidence label:** (silicon) — measurements on real hardware")
+    a("")
+
+    # ── Overall verdict ────────────────────────────────────────────────
+    verdict = results.get("verdict", "UNKNOWN")
+    is_pass = results.get("overall_pass", False)
+    a("## Overall Verdict")
+    a("")
+    if is_pass:
+        a("> **★★★ READY FOR SILICON SOAK TESTING ★★★**")
+    else:
+        a("> **STOP — UNSAFE — review FAIL items below**")
+    a("")
+
+    # ── Phase summary ──────────────────────────────────────────────────
+    a("## Phase Summary")
+    a("")
+    a("| Phase | Result |")
+    a("|-------|--------|")
+    phases = results.get("phases", {})
+    for key, label in [
+        ("P1_first_frame", "P1 First Frame"),
+        ("P2_sensor_flags", "P2 Sensor Flags"),
+        ("P3_plausibility", "P3 Plausibility"),
+        ("P4_wire_integrity", "P4 Wire Integrity"),
+    ]:
+        ph = phases.get(key, {})
+        ok = ph.get("pass", False)
+        a(f"| {label} | {_md_pass(ok)} |")
+
+    soak = results.get("soak", {})
+    if soak.get("skipped"):
+        a("| P5 Soak | ⏭ SKIPPED |")
+    else:
+        a(f"| P5 Soak ({soak.get('elapsed_s', 0)/60:.1f} min) | {_md_pass(soak.get('pass', False))} |")
+    a(f"| **OVERALL** | **{verdict}** |")
+    a("")
+
+    # ── P1 detail ──────────────────────────────────────────────────────
+    a("## P1: First Frame")
+    a("")
+    p1 = phases.get("P1_first_frame", {})
+    if p1.get("pass"):
+        a(f"- Latency: **{p1.get('latency_s', '?')} s**")
+        a(f"- First sequence number: {p1.get('first_seq', '?')}")
+        a(f"- First flags: `{p1.get('first_flags_hex', '?')}`")
+    else:
+        a("- ❌ No frame received within timeout")
+    a("")
+
+    # ── P2 sensor flags ────────────────────────────────────────────────
+    a("## P2: Sensor Flags")
+    a("")
+    p2 = phases.get("P2_sensor_flags", {})
+    thr = p2.get("threshold_pct", 98.0)
+    a(f"| Sensor | Uptime % | Threshold | Result |")
+    a(f"|--------|----------|-----------|--------|")
+    for s, k in [("INA226", "INA226_OK_pct"), ("IMU (MPU6050)", "IMU_OK_pct"), ("Thermal (NTC)", "THERMAL_OK_pct")]:
+        pct = p2.get(k, 0.0)
+        ok = pct >= thr
+        a(f"| {s} | {pct:.2f}% | ≥{thr:.0f}% | {_md_pass(ok)} |")
+    a("")
+
+    # ── P3 plausibility ────────────────────────────────────────────────
+    a("## P3: Plausibility")
+    a("")
+    p3 = phases.get("P3_plausibility", {})
+    tmean = p3.get("temp_K_mean", 0.0)
+    a(f"| Metric | Value | Expected |")
+    a(f"|--------|-------|----------|")
+    a(f"| temp_K mean | {tmean:.2f} K ({tmean-273.15:.1f} °C) | {TEMP_K_MIN:.0f}–{TEMP_K_MAX:.0f} K |")
+    a(f"| temp_K range | [{p3.get('temp_K_min','?'):.2f}, {p3.get('temp_K_max','?'):.2f}] K | within range |")
+    a(f"| current_A range | [{p3.get('current_A_min','?'):.3f}, {p3.get('current_A_max','?'):.3f}] A | < {CURRENT_ABS_MAX} A |")
+    a(f"| vib_rms_max | {p3.get('vib_rms_max_g','?'):.4f} g | < {VIB_MAX_G} g |")
+    a(f"| quality_min | {p3.get('quality_min','?'):.1f} | ≥ 17 (one sensor) |")
+    a(f"| NaN frames | {p3.get('n_nan_frames', 0)} | 0 |")
+    a(f"| SAFE_HALT frames | {p3.get('n_safe_halt', 0)} | 0 |")
+    a("")
+
+    # ── P4 wire integrity ──────────────────────────────────────────────
+    a("## P4: Wire Integrity")
+    a("")
+    p4 = phases.get("P4_wire_integrity", {})
+    a(f"| Metric | Value | Threshold |")
+    a(f"|--------|-------|-----------|")
+    a(f"| Frames received | {p4.get('n_frames',0):,} / {p4.get('expected_frames',0):,} | — |")
+    a(f"| Delivery rate | {p4.get('delivery_pct',0):.2f}% | ≥{DELIVERY_TARGET*100:.0f}% |")
+    a(f"| CRC errors | {p4.get('n_crc_errors',0)} | 0 |")
+    a(f"| Sync drops (bytes) | {p4.get('n_sync_drops',0)} | 0 |")
+    a(f"| Sequence jumps | {p4.get('n_seq_jumps',0)} | 0 |")
+    a("")
+
+    # ── Jitter analysis ────────────────────────────────────────────────
+    a("## Jitter Analysis (ts_us inter-frame deltas)")
+    a("")
+    jitter = results.get("jitter", {})
+    if jitter:
+        ok = jitter.get("jitter_ok", False)
+        a(f"| Metric | Value | Expected |")
+        a(f"|--------|-------|----------|")
+        a(f"| Samples | {jitter.get('n_deltas',0):,} | — |")
+        a(f"| Mean delta | {jitter.get('mean_us','?')} µs | 1000 µs |")
+        a(f"| Std dev | {jitter.get('stddev_us','?')} µs | < 100 µs |")
+        a(f"| Min / Max | {jitter.get('min_us','?')} / {jitter.get('max_us','?')} µs | — |")
+        a(f"| Late (>1.5 ms) | {jitter.get('n_late_gt1500us',0)} ({jitter.get('late_pct',0):.3f}%) | ≈ 0 |")
+        a(f"| Burst (<0.5 ms) | {jitter.get('n_burst_lt500us',0)} | ≈ 0 |")
+        a(f"| **Result** | **{_md_pass(ok)}** | mean ±5%, σ < 100 µs |")
+    else:
+        a("_Jitter data not available (no soak run)._")
+    a("")
+
+    # ── Sensor freeze ──────────────────────────────────────────────────
+    a("## Sensor Freeze Detection")
+    a("")
+    freeze = results.get("sensor_freeze", {})
+    total_events = freeze.get("total_freeze_events", 0)
+    if freeze:
+        if total_events == 0:
+            a("✅ No freeze events detected across 200-frame sliding window.")
+        else:
+            a(f"⚠️ **{total_events} freeze event(s) detected:**")
+            a("")
+            by_field = freeze.get("by_field", {})
+            for fname, cnt in by_field.items():
+                if cnt > 0:
+                    a(f"- `{fname}`: {cnt} event(s)")
+            a("")
+            a("> A freeze event = 200 consecutive frames with identical value.")
+            a("> LKG propagation when sensor flag is clear is **expected**.")
+            a("> Freeze with sensor flag SET is a fault.")
+    else:
+        a("_Freeze detection not run._")
+    a("")
+
+    # ── Throughput ─────────────────────────────────────────────────────
+    a("## UART Throughput")
+    a("")
+    tput = results.get("throughput", {})
+    if tput:
+        a(f"| Metric | Measured | Expected |")
+        a(f"|--------|----------|----------|")
+        a(f"| Total bytes | {tput.get('total_bytes',0):,} | — |")
+        a(f"| Throughput | {tput.get('bytes_per_sec',0):.0f} B/s | {tput.get('expected_bytes_per_sec',66000):,} B/s |")
+        a(f"| Link utilisation | {tput.get('utilization_pct',0):.2f}% | {tput.get('expected_utilization_pct',71.6):.1f}% |")
+    else:
+        a("_Throughput data not available._")
+    a("")
+
+    # ── Soak detail ────────────────────────────────────────────────────
+    if soak and not soak.get("skipped"):
+        a("## P5: Soak Detail")
+        a("")
+        a(f"Duration: **{soak.get('elapsed_s', 0)/60:.1f} min**")
+        a("")
+        a(f"| Metric | Value |")
+        a(f"|--------|-------|")
+        a(f"| Frames | {soak.get('n_frames',0):,} / {soak.get('expected_frames',0):,} ({soak.get('delivery_pct',0):.2f}%) |")
+        a(f"| CRC errors | {soak.get('n_crc_errors',0)} |")
+        a(f"| INA226 uptime | {soak.get('ina226_ok_pct',0):.2f}% |")
+        a(f"| IMU uptime | {soak.get('imu_ok_pct',0):.2f}% |")
+        a(f"| Thermal uptime | {soak.get('thermal_ok_pct',0):.2f}% |")
+        a(f"| temp_K min/max | {soak.get('temp_K_min','?'):.2f} / {soak.get('temp_K_max','?'):.2f} K |")
+        a(f"| NaN frames | {soak.get('n_nan_frames',0)} |")
+        a(f"| SAFE_HALT events | {soak.get('n_safe_halt',0)} |")
+        a(f"| THERMAL_SHUT events | {soak.get('n_thermal_shut',0)} |")
+        a(f"| WATCHDOG_RST events | {soak.get('n_watchdog_rst',0)} |")
+        a(f"| Brownout events | {soak.get('n_brownout',0)} |")
+
+        per_min = soak.get("per_minute_frames", [])
+        if per_min:
+            a("")
+            a("### Per-Minute Frame Count")
+            a("")
+            a("| Minute | Frames | Rate (Hz) |")
+            a("|--------|--------|-----------|")
+            for i, cnt in enumerate(per_min, 1):
+                hz = cnt / 60.0
+                a(f"| {i} | {cnt:,} | {hz:.0f} |")
+        a("")
+
+    # ── Footer ─────────────────────────────────────────────────────────
+    a("---")
+    a("")
+    a("*Generated by `bringup/verify_bringup.py` — Filament Winding CAM Platform*  ")
+    a(f"*Faz 19B commissioning framework — {ts_str}*")
+    a("")
+
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Helpers
 # ═══════════════════════════════════════════════════════════════════════
 
 def _pf(ok: bool) -> str:
     return f"{G}PASS{Z}" if ok else f"{R}FAIL{Z}"
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Main verifier
+# ═══════════════════════════════════════════════════════════════════════
+
 def verify_bringup(
     port: str,
     baud: int = 921600,
     soak_minutes: float = 10.0,
     skip_soak: bool = False,
+    report_dir: str = "",
 ) -> dict:
     try:
         import serial
@@ -327,12 +744,17 @@ def verify_bringup(
     print(f"  Time:    {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
+    ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
     results: dict = {
         "timestamp": datetime.datetime.now().isoformat(),
         "port": port,
         "baud": baud,
         "phases": {},
         "soak": {},
+        "jitter": {},
+        "sensor_freeze": {},
+        "throughput": {},
         "verdict": "UNKNOWN",
     }
 
@@ -351,7 +773,10 @@ def verify_bringup(
 
     print(f"  Port opened OK: {port}")
 
-    parser = FrameParser()
+    parser     = FrameParser()
+    jitter     = JitterAnalyzer()
+    freeze     = SensorFreezeDetector()
+    throughput = ThroughputTracker()
 
     # ──────────────────────────────────────────────────────────────────
     # Phase 1: First frame within timeout
@@ -365,6 +790,7 @@ def verify_bringup(
     while (time.monotonic() - t0) < FIRST_FRAME_TIMEOUT_S:
         chunk = ser.read(256)
         if chunk:
+            throughput.add_bytes(len(chunk))
             frames = parser.feed(chunk)
             if frames:
                 first_frame = frames[0]
@@ -404,7 +830,9 @@ def verify_bringup(
     print()
     print(f"{B}── Phases 2-4: {PHASE4_WINDOW_S:.0f}-second initial window ──{Z}")
     stats_p4 = SoakStats()
-    stats_p4.ingest(first_frame)  # fold in the first frame already captured
+    stats_p4.ingest(first_frame, wall_t=time.monotonic())
+    jitter.update(first_frame.ts_us)
+    freeze.update(first_frame)
 
     t_p4_start = time.monotonic()
     t_last_print = t_p4_start
@@ -413,24 +841,30 @@ def verify_bringup(
     while (time.monotonic() - t_p4_start) < PHASE4_WINDOW_S:
         chunk = ser.read(512)
         if chunk:
+            throughput.add_bytes(len(chunk))
             for f in parser.feed(chunk):
-                stats_p4.ingest(f)
+                stats_p4.ingest(f, wall_t=time.monotonic())
+                jitter.update(f.ts_us)
+                freeze.update(f)
 
         now = time.monotonic()
         if now - t_last_print >= 5.0:
             elapsed = now - t_p4_start
             rate_hz = stats_p4.n_frames / elapsed if elapsed > 0 else 0
+            frozen_now = freeze.total_freeze_events
             print(f"  t={elapsed:4.0f}s  frames={stats_p4.n_frames:,d}  "
                   f"rate={rate_hz:.0f} Hz  "
                   f"crc={parser.n_crc_errors}  "
                   f"temp={stats_p4.temp_K_mean - 273.15:.1f}°C  "
                   f"INA={stats_p4.ina226_ok_pct:.0f}%  "
                   f"IMU={stats_p4.imu_ok_pct:.0f}%  "
-                  f"THERM={stats_p4.thermal_ok_pct:.0f}%")
+                  f"THERM={stats_p4.thermal_ok_pct:.0f}%"
+                  + (f"  {Y}freeze={frozen_now}{Z}" if frozen_now else ""))
             t_last_print = now
 
     p4_elapsed = time.monotonic() - t_p4_start
     stats_p4.elapsed_s = p4_elapsed
+    stats_p4.flush_last_minute()
     expected_p4 = int(expected_rate_hz * p4_elapsed)
     delivery_p4 = stats_p4.n_frames / expected_p4 if expected_p4 > 0 else 0.0
 
@@ -508,6 +942,29 @@ def verify_bringup(
     print(f"    Sync drops:  {parser.n_sync_drops} bytes")
     print(f"    Seq jumps:   {stats_p4.n_seq_jumps}")
 
+    # Print jitter after P4
+    print()
+    jd = jitter.as_dict()
+    print(f"  Jitter (ts_us deltas, {jd['n_deltas']:,d} samples):")
+    print(f"    mean={jd['mean_us']} µs  σ={jd['stddev_us']} µs  "
+          f"min={jd['min_us']} µs  max={jd['max_us']} µs")
+    if jd['n_late_gt1500us'] > 0:
+        print(f"    {Y}Late frames (>1.5ms): {jd['n_late_gt1500us']}{Z}")
+    if not jd['jitter_ok']:
+        print(f"    {Y}WARN: jitter outside expected range{Z}")
+
+    results["jitter"] = jd
+    results["sensor_freeze"] = freeze.as_dict()
+    results["throughput"] = throughput.as_dict()
+
+    # Print freeze summary
+    if freeze.total_freeze_events > 0:
+        print()
+        print(f"  {Y}WARN  Sensor freeze events: {freeze.total_freeze_events}{Z}")
+        for fname, cnt in freeze.freeze_counts.items():
+            if cnt > 0:
+                print(f"         {fname}: {cnt} event(s)")
+
     # ──────────────────────────────────────────────────────────────────
     # Phase 5: Soak
     # ──────────────────────────────────────────────────────────────────
@@ -524,14 +981,17 @@ def verify_bringup(
         stats_soak = SoakStats()
         t_soak_start = time.monotonic()
         t_last_print = t_soak_start
-        print_interval = 60.0   # print status every minute
+        print_interval = 60.0
 
         try:
             while (time.monotonic() - t_soak_start) < soak_s:
                 chunk = ser.read(512)
                 if chunk:
+                    throughput.add_bytes(len(chunk))
                     for f in parser.feed(chunk):
-                        stats_soak.ingest(f)
+                        stats_soak.ingest(f, wall_t=time.monotonic())
+                        jitter.update(f.ts_us)
+                        freeze.update(f)
 
                 now = time.monotonic()
                 if now - t_last_print >= print_interval:
@@ -553,9 +1013,9 @@ def verify_bringup(
 
         soak_elapsed = time.monotonic() - t_soak_start
         stats_soak.elapsed_s = soak_elapsed
+        stats_soak.flush_last_minute()
         expected_soak = int(expected_rate_hz * soak_elapsed)
         delivery_soak = stats_soak.n_frames / expected_soak if expected_soak > 0 else 0.0
-        # Use cumulative CRC count from the whole session
         soak_crc = parser.n_crc_errors - results["phases"]["P4_wire_integrity"]["n_crc_errors"]
 
         p5_delivery = delivery_soak >= DELIVERY_TARGET
@@ -568,7 +1028,7 @@ def verify_bringup(
         p5_ok       = (p5_delivery and p5_crc and p5_ina and p5_imu
                        and p5_therm and p5_halt and p5_nonan)
 
-        results["soak"] = {
+        soak_dict = {
             "pass": p5_ok,
             "elapsed_s": round(soak_elapsed, 1),
             "n_frames": stats_soak.n_frames,
@@ -582,8 +1042,15 @@ def verify_bringup(
             "n_brownout":   stats_soak.n_brownout,
             "n_watchdog_rst": stats_soak.n_watchdog_rst,
             "n_thermal_shut": stats_soak.n_thermal_shut,
-            **stats_soak.as_dict(),
+            "per_minute_frames": stats_soak.per_minute_frames,
         }
+        soak_dict.update(stats_soak.as_dict())
+        results["soak"] = soak_dict
+
+        # Update final jitter and freeze after soak
+        results["jitter"] = jitter.as_dict()
+        results["sensor_freeze"] = freeze.as_dict()
+        results["throughput"] = throughput.as_dict()
 
         print()
         print(f"  Phase 5 soak ({soak_elapsed/60:.1f} min): {_pf(p5_ok)}")
@@ -594,6 +1061,7 @@ def verify_bringup(
               f"THERMAL_OK: {stats_soak.thermal_ok_pct:.2f}%")
         print(f"    temp_K range: [{stats_soak.temp_K_min:.2f}, {stats_soak.temp_K_max:.2f}]  "
               f"mean={stats_soak.temp_K_mean:.2f} K")
+        print(f"    Jitter: mean={jitter.mean_us:.1f} µs  σ={jitter.stddev_us:.1f} µs")
         if stats_soak.n_safe_halt > 0:
             print(f"    {R}SAFE_HALT events: {stats_soak.n_safe_halt}{Z}")
         if stats_soak.n_thermal_shut > 0:
@@ -646,6 +1114,7 @@ Examples:
   python verify_bringup.py --port /dev/ttyUSB1 --soak-minutes 10
   python verify_bringup.py --port /dev/ttyUSB1 --skip-soak
   python verify_bringup.py --port COM3 --soak-minutes 1
+  python verify_bringup.py --port /dev/ttyUSB1 --report-dir ./reports/session1
         """,
     )
     ap.add_argument("--port", required=True,
@@ -656,6 +1125,10 @@ Examples:
                     help="Soak duration in minutes (default: 10)")
     ap.add_argument("--skip-soak", action="store_true",
                     help="Skip Phase 5 soak (for quick smoke tests)")
+    ap.add_argument("--report-dir", default="",
+                    help="Directory for JSON + Markdown reports (default: same dir as script)")
+    ap.add_argument("--no-markdown", action="store_true",
+                    help="Skip markdown report generation")
     args = ap.parse_args()
 
     results = verify_bringup(
@@ -663,17 +1136,25 @@ Examples:
         baud=args.baud,
         soak_minutes=args.soak_minutes,
         skip_soak=args.skip_soak,
+        report_dir=args.report_dir,
     )
 
-    # Write JSON
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.dirname(os.path.abspath(__file__))
+    out_dir = args.report_dir if args.report_dir else os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(out_dir, exist_ok=True)
+
     json_path = os.path.join(out_dir, f"bringup_results_{ts}.json")
     with open(json_path, "w") as fh:
         json.dump(results, fh, indent=2, default=str)
-    print(f"  Results written: {json_path}")
-    print()
+    print(f"  Results (JSON):     {json_path}")
 
+    if not args.no_markdown:
+        md_path = os.path.join(out_dir, f"bringup_report_{ts}.md")
+        with open(md_path, "w") as fh:
+            fh.write(generate_markdown_report(results, ts))
+        print(f"  Report (Markdown):  {md_path}")
+
+    print()
     sys.exit(0 if results.get("overall_pass") else 1)
 
 
