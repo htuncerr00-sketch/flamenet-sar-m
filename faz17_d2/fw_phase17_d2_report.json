@@ -1,0 +1,238 @@
+{
+  "timestamp": "2026-05-20 18:46:47",
+  "delivery": "Faz 17 \u2014 Teslimat 2 (Desktop UI Application)",
+  "total_tests": 8,
+  "tests_passed": 8,
+  "tests_failed": 0,
+  "composite_score": 100.0,
+  "outcomes": [
+    {
+      "name": "backend_d1_regression",
+      "result": {
+        "passed": true,
+        "return_code": 0,
+        "ready_token": true
+      },
+      "elapsed_s": 5.0,
+      "passed": true,
+      "error": null
+    },
+    {
+      "name": "main_window_smoke",
+      "result": {
+        "n_tabs": 7,
+        "rc": 0,
+        "elapsed": 1.2,
+        "passed": true
+      },
+      "elapsed_s": 1.84,
+      "passed": true,
+      "error": null
+    },
+    {
+      "name": "ui_freeze_test",
+      "result": {
+        "n": 286,
+        "target_ms": 10.0,
+        "mean_ms": 10.002337650349828,
+        "p50_ms": 10.106375000077605,
+        "p90_ms": 10.464448999982778,
+        "p99_ms": 10.798908999959167,
+        "p999_ms": 11.744758999952865,
+        "max_ms": 11.744758999952865,
+        "min_ms": 9.054475000084494,
+        "n_signal_emissions": 87,
+        "n_frames_received": 26718,
+        "frames_per_second": 8906.0,
+        "signals_per_second": 29.0,
+        "stream_drops": 0,
+        "stream_received": 26919,
+        "passed": true
+      },
+      "elapsed_s": 2.87,
+      "passed": true,
+      "error": null
+    },
+    {
+      "name": "fps_benchmark",
+      "result": {
+        "duration_s": 2.8741120869999577,
+        "paint_events": 88,
+        "fps": 30.618151740858426,
+        "target_fps": 30.0,
+        "passed": true
+      },
+      "elapsed_s": 3.04,
+      "passed": true,
+      "error": null
+    },
+    {
+      "name": "memory_leak",
+      "result": {
+        "rss_before_kb": 162704,
+        "rss_after_kb": 162704,
+        "rss_growth_kb": 0,
+        "tracemalloc_growth_kb": 881.1,
+        "top_growth": [
+          {
+            "file": "/home/claude/filament_winding/faz17_d2/backend/hardware/esp32_link.py:0",
+            "size_diff_kb": 797.7109375,
+            "count_diff": 11853
+          },
+          {
+            "file": "/usr/local/lib/python3.12/dist-packages/pyqtgraph/graphicsItems/PlotDataItem.py:",
+            "size_diff_kb": 74.5,
+            "count_diff": 52
+          },
+          {
+            "file": "/home/claude/filament_winding/faz17_d2/app/panels/predictive_maintenance.py:0",
+            "size_diff_kb": 3.046875,
+            "count_diff": 65
+          },
+          {
+            "file": "/home/claude/filament_winding/faz17_d2/app/widgets/realtime_chart.py:0",
+            "size_diff_kb": 1.34375,
+            "count_diff": 22
+          },
+          {
+            "file": "/usr/local/lib/python3.12/dist-packages/pyqtgraph/graphicsItems/PlotCurveItem.py",
+            "size_diff_kb": 1.03125,
+            "count_diff": 16
+          }
+        ],
+        "warmup_s": 15.0,
+        "measure_s": 10.0,
+        "passed": true
+      },
+      "elapsed_s": 27.3,
+      "passed": true,
+      "error": null
+    },
+    {
+      "name": "replay_stress_1M",
+      "result": {
+        "n_frames_requested": 1000000,
+        "n_frames_recovered": 1000000,
+        "dropped_count": 0,
+        "uncompressed_bytes": 64000000,
+        "compressed_bytes": 40951833,
+        "compression_ratio": 1.5628116084571844,
+        "generate_time_s": 77.51500061299998,
+        "generate_rate_fps": 12900.728789161498,
+        "load_decode_time_s": 69.40538168600006,
+        "load_decode_rate_fps": 14408.104612465702,
+        "byte_identical_first": true,
+        "seqs_correct": true,
+        "passed": true
+      },
+      "elapsed_s": 147.24,
+      "passed": true,
+      "error": null
+    },
+    {
+      "name": "shutdown_integrity",
+      "result": {
+        "n_cycles": 3,
+        "cycle_runtime_s": 1.0,
+        "cycle_times": [
+          1.418,
+          0.519,
+          1.305
+        ],
+        "total_time_s": 3.243,
+        "mean_cycle_s": 1.081,
+        "baseline_threads": 1,
+        "final_threads": 1,
+        "thread_leak": 0,
+        "n_errors": 0,
+        "errors": [],
+        "passed": true
+      },
+      "elapsed_s": 3.25,
+      "passed": true,
+      "error": null
+    },
+    {
+      "name": "soak_simulation_60s",
+      "result": {
+        "total_seconds": 60.0,
+        "link_rate_hz": 5000.0,
+        "n_windows": 6,
+        "samples": [
+          {
+            "window": 1,
+            "rss_kb": 179620,
+            "fps": 4346.845954102796,
+            "n_frames": 15300,
+            "n_alarms": 0,
+            "n_batches": 150,
+            "stream_dropped": 0,
+            "stream_gaps": 0
+          },
+          {
+            "window": 2,
+            "rss_kb": 179620,
+            "fps": 4391.296223131087,
+            "n_frames": 24209,
+            "n_alarms": 0,
+            "n_batches": 312,
+            "stream_dropped": 0,
+            "stream_gaps": 0
+          },
+          {
+            "window": 3,
+            "rss_kb": 179620,
+            "fps": 4337.061219555768,
+            "n_frames": 15175,
+            "n_alarms": 0,
+            "n_batches": 414,
+            "stream_dropped": 0,
+            "stream_gaps": 0
+          },
+          {
+            "window": 4,
+            "rss_kb": 179620,
+            "fps": 4380.910612777704,
+            "n_frames": 24065,
+            "n_alarms": 0,
+            "n_batches": 576,
+            "stream_dropped": 0,
+            "stream_gaps": 0
+          },
+          {
+            "window": 5,
+            "rss_kb": 179620,
+            "fps": 4329.770794596956,
+            "n_frames": 15185,
+            "n_alarms": 0,
+            "n_batches": 678,
+            "stream_dropped": 0,
+            "stream_gaps": 0
+          },
+          {
+            "window": 6,
+            "rss_kb": 179620,
+            "fps": 4346.725786937357,
+            "n_frames": 23907,
+            "n_alarms": 0,
+            "n_batches": 840,
+            "stream_dropped": 0,
+            "stream_gaps": 0
+          }
+        ],
+        "rss_growth_kb": 0.0,
+        "fps_min": 4329.8,
+        "fps_max": 4391.3,
+        "fps_mean": 4355.4,
+        "fps_jitter_pct": 1.4,
+        "n_frames_total": 123942,
+        "n_alarms": 0,
+        "stream_dropped": 0,
+        "passed": true
+      },
+      "elapsed_s": 28.74,
+      "passed": true,
+      "error": null
+    }
+  ]
+}

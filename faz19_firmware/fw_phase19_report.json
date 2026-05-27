@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-05-23 09:35:11",
+  "phase": "Faz 19A \u2014 ESP-IDF Telemetry Firmware",
+  "delivery": "Wire-compatible firmware skeleton + host-side end-to-end verification",
+  "scope_in_19A": [
+    "ESP-IDF project skeleton (CMakeLists, sdkconfig.defaults)",
+    "UART1 @ 921600 baud with 4KB TX ring buffer",
+    "1 kHz vTaskDelayUntil deterministic loop",
+    "Static frame buffer, no malloc",
+    "Byte-identical wire format vs PC parser (CRC-16/CCITT 0x1021)",
+    "Synthetic telemetry generation (real sensors in 19B)",
+    "Host-side verification via gcc + pty (no ESP32 needed for proof)"
+  ],
+  "scope_deferred": [
+    "Real sensors (INA226 / MPU6050 / NTC) \u2014 Faz 19B",
+    "Brownout/WDT-reset reason / thermal derating \u2014 Faz 19C",
+    "CAN ESC bridge \u2014 Faz 19D"
+  ],
+  "verification": {
+    "host_compile": "0 errors, 0 warnings (-Wall -Wextra -std=c11)",
+    "protocol_byte_match": "100/100 frames bit-identical via PC parser",
+    "round_trip_100": "C-output \u2192 PC-decode \u2192 PC-pack \u2192 bytes match: 100/100",
+    "pty_real_link": "1000/1000 frames decoded by RealESP32Link, 0 CRC, 0 sync",
+    "field_test_10s": "97.9% delivery, 0 CRC, 0 sync errors",
+    "field_test_30s": "99.9% delivery, 0 CRC, 0 sync errors",
+    "session_auto_recorded": "29,582 frames in TelemetryDB",
+    "faz18_regression": "10/10 bring-up scenarios still pass"
+  },
+  "delivery_pct_target": ">95% (per spec)",
+  "delivery_pct_actual": "99.9% on 30s sustained test",
+  "field_test_summary": {
+    "duration_s": 30.09,
+    "expected_frames": 30000,
+    "decoded_frames": 29971,
+    "delivery_pct": 99.9,
+    "crc_errors": 0,
+    "sync_errors": 0
+  },
+  "next_step": "Plug actual ESP32 with this firmware flashed \u2192 run field_test_faz19.py with real port. Expect same numbers."
+}

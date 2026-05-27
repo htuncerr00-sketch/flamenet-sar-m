@@ -1,0 +1,67 @@
+{
+  "timestamp": "2026-05-27 04:42:56",
+  "phase": "Faz 19B \u2014 Sensor Integration",
+  "delivery": "Production-grade INA226 + MPU6050 + NTC drivers, sensor_pipeline aggregator, race-safe cache, runtime fault tolerance",
+  "tests_passed": {
+    "unit_tests_total": 108,
+    "test_ina226_assertions": 24,
+    "test_thermal_assertions": 20,
+    "test_mpu6050_assertions": 24,
+    "test_sensor_pipeline_assertions": 36,
+    "test_race_cache_assertions": 4,
+    "field_test_faz19a_passed": true,
+    "field_test_faz19b_runtime_passed": true
+  },
+  "field_test_19b_runtime": {
+    "duration_s": 10.2,
+    "delivery_pct": 100.9,
+    "crc_errors": 0,
+    "sync_errors": 0,
+    "flag_isolation": "100% per-sensor isolation across 3 fault windows",
+    "lkg_preservation": {
+      "INA226_current_constant": true,
+      "IMU_vib_x_constant": true,
+      "Thermal_temp_constant": true
+    },
+    "quality_transitions": "92.0 (healthy) \u2192 67.0 (1 sensor down) \u2192 92.0 (recovery)"
+  },
+  "race_cache_stress": {
+    "duration_s": 3.0,
+    "consumer_threads": 3,
+    "snapshots": 7559732,
+    "reads": 49950331,
+    "torn_reads": 0,
+    "verdict": "mutex+bulk-copy is race-safe under extreme contention"
+  },
+  "uart_throughput": {
+    "baud": 921600,
+    "utilization_pct": 71.6,
+    "headroom_pct": 28.4,
+    "tx_ring_bytes": 4096,
+    "burst_tolerance_ms": 44.4,
+    "i2c_utilization_pct": 4.72
+  },
+  "static_analysis": {
+    "malloc_in_realtime_path": false,
+    "vlas": false,
+    "compile_warnings": 0
+  },
+  "regression_status": {
+    "faz17_d2": "PASS (8/8 composite 100/100)",
+    "faz18": "PASS (10/10 bring-up scenarios)",
+    "faz19a": "PASS (99.9% delivery 30s soak)"
+  },
+  "production_readiness": "HOST-SIDE READY \u2014 pending real-ESP32 commissioning",
+  "deferred_to_real_hw": [
+    "UART clock stability @ 921600 baud",
+    "I\u00b2C pullup tuning",
+    "INA226 accuracy vs reference ammeter",
+    "MPU6050 noise floor",
+    "NTC \u03b2-coefficient calibration",
+    "FreeRTOS 1ms tick jitter measurement",
+    "Stack HWM measurement",
+    "30-min soak heap stability",
+    "Brownout/WDT real triggers",
+    "Cable unplug recovery"
+  ]
+}

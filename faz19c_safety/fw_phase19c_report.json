@@ -1,0 +1,76 @@
+{
+  "phase": "19C",
+  "title": "Safety Monitor Firmware Layer",
+  "date": "2026-05-27",
+  "status": "COMPLETE",
+
+  "scope": [
+    "Boot-time reset reason classification (brownout, WDT, panic, power-on, software)",
+    "Runtime thermal shutdown: ≥ 373.15 K for 3 consecutive 100 ms samples",
+    "Runtime overcurrent shutdown: ≥ 45.0 A for 3 consecutive 100 ms samples",
+    "SAFE_HALT flag set before esp_restart() so PC telemetry parser sees event",
+    "Lock-free volatile float safety snapshot in sensor_pipeline (never blocks)",
+    "New telemetry flag bits: BROWNOUT (12), THERMAL_SHUTDOWN (13), WATCHDOG_RESET (14)",
+    "Updated app_main.c: safety_monitor_init() called first at boot"
+  ],
+
+  "new_files": [
+    "include/safety_monitor.h",
+    "main/safety_monitor.c",
+    "host_test/test_safety_monitor.c"
+  ],
+
+  "updated_files": [
+    "include/telemetry_frame.h  — added TELEM_FLAG_BROWNOUT/THERMAL_SHUTDOWN/WATCHDOG_RESET",
+    "include/sensor_pipeline.h  — added sensor_pipeline_get_safety_snapshot()",
+    "main/sensor_pipeline.c     — added volatile float safety snapshot, get_safety_snapshot()",
+    "main/app_main.c            — added safety_monitor_init() + safety_monitor_start()",
+    "host_test/run_all_tests.sh — added test_safety_monitor suite"
+  ],
+
+  "safety_invariants": {
+    "never_blocks": "safety_monitor_task() reads volatile floats — no mutex, no I2C, no blocking",
+    "no_callbacks_under_lock": "safety_halt() is called after releasing all locks",
+    "halt_before_restart": "SAFE_HALT + event flags written before esp_restart() — 100 ms UART drain",
+    "no_malloc": "static state only, zero heap allocation in realtime path",
+    "idempotent_halt": "double-halt is a no-op; flags do not change after first halt"
+  },
+
+  "thresholds": {
+    "SAFETY_TEMP_SHUTDOWN_K": 373.15,
+    "SAFETY_CURRENT_MAX_A": 45.0,
+    "SAFETY_CONSEC_SHUTDOWN": 3,
+    "task_period_ms": 100
+  },
+
+  "test_results": {
+    "runner": "host_test/run_all_tests.sh",
+    "suites": {
+      "test_ina226":          {"pass": 24, "fail": 0},
+      "test_thermal":         {"pass": 20, "fail": 0},
+      "test_mpu6050":         {"pass": 24, "fail": 0},
+      "test_sensor_pipeline": {"pass": 36, "fail": 0},
+      "test_race_cache":      {"pass":  4, "fail": 0},
+      "test_safety_monitor":  {"pass": 29, "fail": 0}
+    },
+    "total_pass": 137,
+    "total_fail": 0,
+    "wall_clock_s": 4
+  },
+
+  "test_coverage": {
+    "A_reset_reason_classification": "5 scenarios: power-on, brownout, watchdog, panic, software",
+    "B_string_api": "2 assertions: non-NULL string for each reason",
+    "C_thermal_detection": "7 assertions: below/at/consec/halt/flags/reset-counter",
+    "D_overcurrent_detection": "5 assertions: below/at/consec/halt/flags",
+    "E_safe_halt": "3 assertions: initial state / triggered / idempotent",
+    "F_integration": "2 assertions: nominal flags / threshold boundary"
+  },
+
+  "pending": {
+    "19D": "CAN/TWAI bridge — can_bridge.c — ESC heartbeat, throttle feedback, motor telemetry",
+    "20":  "Real ESP32 commissioning — 16-item checklist: idf.py build/flash, 30-min soak",
+    "P1":  "NVS calibration storage — INA226 cal register, IMU bias offsets, Steinhart-Hart constants",
+    "P1":  "Port auto-discovery UI — list available COM/tty in commissioning panel"
+  }
+}

@@ -1,0 +1,22 @@
+# sdkconfig.defaults — Faz 19A Firmware Project Defaults
+# ======================================================
+# Defaults that ship with the project. Run `idf.py menuconfig` to
+# override. These ensure 1 kHz vTaskDelayUntil precision.
+
+# Tick rate — required for 1 ms vTaskDelayUntil
+CONFIG_FREERTOS_HZ=1000
+
+# Task watchdog — 5 second timeout is enough for our 1ms loop
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
+CONFIG_ESP_TASK_WDT_EN=y
+
+# Use the high-resolution timer for esp_timer_get_time()
+CONFIG_ESP_TIMER_TASK_STACK_SIZE=4096
+
+# Reduce log verbosity so it doesn't compete with telemetry UART
+# (UART0 console vs UART1 telemetry — separate, but lower priority
+# logging avoids print storms)
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Use main XTAL/PLL clock for stable UART baud
+CONFIG_UART_ISR_IN_IRAM=y

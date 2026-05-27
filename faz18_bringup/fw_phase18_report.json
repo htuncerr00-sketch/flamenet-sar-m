@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-05-20 18:47:38",
+  "phase": "Faz 18 \u2014 Hardware Bring-Up Sprint",
+  "delivery": "Production-grade RealESP32Link + auto-record + commissioning bring-up",
+  "tests": {
+    "bringup_validation_10_scenarios": {
+      "rc": 0,
+      "passed_token": true,
+      "n_pass": 10,
+      "n_total": 10
+    },
+    "bringup_ui_integration_end_to_end": {
+      "rc": 0,
+      "passed": true
+    },
+    "faz17_d2_regression": {
+      "passed": true,
+      "composite": 100.0
+    }
+  },
+  "key_metrics_seen": {
+    "real_link_frames_decoded": 5359,
+    "real_link_crc_errors": 0,
+    "real_link_sync_errors": 0,
+    "ui_chart_fps": "~24",
+    "ui_alarm_propagation": "1/1 alarm reached UI",
+    "session_auto_recorded": 5144,
+    "bringup_scenarios": "10/10 pass"
+  }
+}
