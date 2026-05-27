@@ -17,10 +17,11 @@
  *   from telemetry rate (1 kHz) gives the bus headroom AND keeps the
  *   telemetry loop deterministic (no I²C latency variance).
  *
- * Priority order:
- *   telemetry_task  priority 10  (latency-critical)
- *   sensor_i2c_task priority  9  (one tick below; can be preempted by
- *                                 telemetry task during its 1 ms slot)
+ * Priority order (producer > consumer — see TASK_SCHEDULING_AUDIT.md):
+ *   sensor_i2c_task priority 12  (producer: I²C reads + cache write complete
+ *                                 before telemetry task can run; no mutex
+ *                                 contention possible from below)
+ *   telemetry_task  priority 10  (consumer: reads stable cache snapshot)
  */
 #include "telemetry_task.h"
 #include "telemetry_frame.h"
@@ -106,15 +107,19 @@ BaseType_t telemetry_task_start(void) {
        any task starts reading. */
     sensor_pipeline_init();
 
-    /* sensor_i2c_task: priority just below telemetry; same core to keep
-       cache writes hot and avoid cross-core invalidations. */
+#define SENSOR_TASK_PRIORITY 12  /* producer: above telemetry */
+#define TELEM_TASK_PRIORITY  10  /* consumer: below sensor */
+
+    /* sensor_i2c_task: higher priority than telemetry (producer > consumer).
+       Ensures I²C reads and cache write complete atomically before telemetry
+       can read the cache — true priority inversion is impossible. */
     BaseType_t rc = xTaskCreatePinnedToCore(
-        sensor_i2c_task, "sens", 4096, NULL, 9, NULL, 1);
+        sensor_i2c_task, "sens", 4096, NULL, SENSOR_TASK_PRIORITY, NULL, 1);
     if (rc != pdPASS) return rc;
 
-    /* telemetry_task: highest non-system priority, same core. */
+    /* telemetry_task: reads stable cache snapshot at 1 kHz. */
     return xTaskCreatePinnedToCore(
-        telemetry_task, "telem", 4096, NULL, 10, NULL, 1);
+        telemetry_task, "telem", 4096, NULL, TELEM_TASK_PRIORITY, NULL, 1);
 }
 
 #else  /* host build — used by host_test */

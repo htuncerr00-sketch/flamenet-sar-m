@@ -216,12 +216,18 @@ static void safety_monitor_task(void *arg) {
     }
 }
 
+#define SAFETY_TASK_PRIORITY 3   /* above health(1); below telemetry(10)/sensor(12) */
+
 BaseType_t safety_monitor_start(void) {
-    return xTaskCreate(safety_monitor_task, "safety_mon",
-                       2048,    /* stack words */
-                       NULL,
-                       1,       /* low priority: 1 of 5 */
-                       NULL);
+    /* Pin to Core 1 alongside sensor and telemetry tasks so volatile float
+       reads of s_safe_temp_K / s_safe_current_A are same-core — no cross-core
+       coherency concerns with the sensor_pipeline safety snapshot. */
+    return xTaskCreatePinnedToCore(safety_monitor_task, "safety_mon",
+                                   2048,
+                                   NULL,
+                                   SAFETY_TASK_PRIORITY,
+                                   NULL,
+                                   1 /* Core 1 */);
 }
 
 #else /* host build */
