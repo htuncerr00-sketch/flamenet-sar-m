@@ -16,6 +16,6 @@ idf_component_register(
     REQUIRES
         driver
         esp_timer
-        esp_adc_cal
+        esp_adc
         log
 )

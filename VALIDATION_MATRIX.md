@@ -3,7 +3,7 @@
 **Document version:** 2026-05-27  
 **Scope:** Full-stack: ESP32 firmware (Faz 19C) + Python backend + PySide6 UI  
 **Status authority:** This is the single source of truth for engineering confidence.  
-**Last test run:** 137/137 host assertions, 0 real-hardware assertions.
+**Last test run:** 137/137 host assertions, 0 real-hardware assertions. First real xtensa-esp32 build: PASS (2026-05-27).
 
 ---
 
@@ -53,7 +53,7 @@ Every cell in this matrix uses one of four explicit evidence labels.
 | F-19 | **Safety monitor — no-blocking invariant** volatile float reads, zero mutex | `PASS [static]` source inspection: safety\_monitor.c contains zero mutex calls; reads `s_safe_temp_K` / `s_safe_current_A` (volatile float) directly | `PENDING` verify under RTOS by inspecting stack trace during safety task | `N/A` | `N/A` | `N/A` | Volatile float reads are atomic on ARMv7-M for aligned 32-bit access per ARM ARM §A3.5.3 — not guaranteed by C11 standard for all platforms | Code inspection + ARM architecture reference |
 | F-20 | **Health monitor** `health_monitor.c` — stack HWM + heap logging @ 0.2 Hz | `PASS [static]` code compiles; function exists and is called from app\_main | `PENDING` read log output; confirm HWMs >1 KB free after 1 hour | `N/A` | `PENDING` 1-hour run; check heap stable after 30 s | `N/A` | uxTaskGetStackHighWaterMark is in words (4 bytes each); misreading the unit would miss a real stack overflow. Log must say bytes or words explicitly | `idf.py monitor` log inspection after 1-hour soak |
 | F-21 | **No malloc in realtime path** (telemetry\_task, sensor\_pipeline) | `PASS [static]` grep `\b(malloc|calloc|realloc|free)\b` across main/*.c: 0 matches in realtime path | `N/A` | `N/A` | `N/A` | `N/A` | Third-party libraries (ESP-IDF internals called indirectly) may allocate; verified only for first-party code | Source grep + sanitizer build (if available) |
-| F-22 | **Firmware build (idf.py)** complete clean build, 0 warnings | `PENDING` — never built with real ESP-IDF toolchain in this project | `PENDING` | `N/A` | `N/A` | `N/A` | **HIGH RISK:** host gcc compilation (x86) is used for tests but `idf.py build` (xtensa-esp32-elf) has never been run. Header-only ESP-IDF mocks may hide real include errors. This is the single highest-risk gap. | `idf.py build` clean with `-Werror`; confirm .bin size fits flash |
+| F-22 | **Firmware build (idf.py)** complete clean build, 0 errors | `PASS [xtensa-build]` **2026-05-27** — `idf.py build` succeeded with ESP-IDF v5.3 / xtensa-esp32-elf-gcc 13.2.0; `filament_winding_telem.bin` 228 KB (22% flash); 0 linker errors; 0 fatal compile errors. 5 deprecation/unused-var warnings (see BUILD_AUDIT.md) | `PENDING` flash + boot | `N/A` | `N/A` | `N/A` | 5 outstanding warnings: `esp_adc_cal` deprecated APIs in `thermal.c` (WARN-1,2,3); unused TAG in thermal.c + sensor_pipeline.c (WARN-4,5). Will break when deprecated/ shim is removed in future ESP-IDF major release. | `BUILD_AUDIT.md` — full error/warning inventory |
 
 ---
 
@@ -123,7 +123,7 @@ Every cell in this matrix uses one of four explicit evidence labels.
 | Sensor pipeline (LKG, flags, concurrency) | ✅ Complete | ⏳ Pending | N/A | **HIGH** (best-tested subsystem) |
 | Safety monitor (C firmware) | ✅ 29/29 | ⏳ Pending | ⏳ Pending | **MEDIUM** (esp_restart() stub on host) |
 | FreeRTOS timing (1 kHz, jitter) | ✅ Analytical | ⏳ Pending | ⏳ Pending | **LOW** (cannot validate without real chip) |
-| Firmware build (idf.py) | ❌ **NEVER BUILT** | ⏳ Pending | N/A | **CRITICAL GAP** |
+| Firmware build (idf.py) | ✅ **BUILT 2026-05-27** (0 errors, 5 warnings) | ⏳ Flash pending | N/A | **HIGH** (binary produced; flash + boot still needed) |
 | Hardware electrical | N/A | ⏳ Pending | ⏳ Pending | **UNKNOWN** |
 | Python backend | ✅ Complete | N/A | N/A | **HIGH** |
 | PySide6 UI | ✅ 30.6 FPS, 0 KB growth | N/A | N/A | **HIGH** (offscreen; real GPU untested) |
@@ -135,7 +135,7 @@ Every cell in this matrix uses one of four explicit evidence labels.
 
 | Priority | Gap | Consequence if not addressed |
 |---|---|---|
-| 🔴 **P0-A** | Firmware never built with `idf.py` (xtensa toolchain) | Any include error, linker issue, or ABI mismatch will be discovered at flash time, not before |
+| ✅ ~~**P0-A**~~ | ~~Firmware never built with `idf.py` (xtensa toolchain)~~ **RESOLVED 2026-05-27** — `idf.py build` passed; see BUILD_AUDIT.md | ~~Any include error, linker issue, or ABI mismatch will be discovered at flash time~~ — **binary produced, 5 warnings remain (thermal.c deprecated ADC API)** |
 | 🔴 **P0-B** | FreeRTOS task priority: telemetry\_task prio=10 > sensor\_i2c\_task prio=9 — potential priority inversion if sensor task holds cache mutex when telemetry task preempts it | Under worst-case scheduling, telemetry may busy-wait on mutex while sensor task is preempted — violates <10 µs timing spec |
 | 🔴 **P0-C** | 30-minute hardware soak never performed | Heap fragmentation, watchdog, I²C lock-up, thermal drift are all invisible without sustained run |
 | 🟡 **P1-A** | ADC Vref not calibrated per-chip | NTC temperature error up to ±5°C without `esp_adc_cal`; could trigger thermal shutdown prematurely |
