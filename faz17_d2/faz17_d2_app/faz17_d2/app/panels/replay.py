@@ -48,20 +48,20 @@ class ReplayPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        title = QLabel("Telemetry Replay")
+        title = QLabel("Telemetri Tekrarı")
         title.setProperty("role", "header")
         layout.addWidget(title)
 
         # Session selector row
         sel_row = QHBoxLayout()
-        sel_row.addWidget(QLabel("Session:"))
+        sel_row.addWidget(QLabel("Oturum:"))
         self._session_combo = QComboBox()
         self._session_combo.setMinimumWidth(280)
         sel_row.addWidget(self._session_combo)
-        refresh_btn = QPushButton("Refresh")
+        refresh_btn = QPushButton("Yenile")
         refresh_btn.clicked.connect(self._refresh_session_list)
         sel_row.addWidget(refresh_btn)
-        load_btn = QPushButton("Load")
+        load_btn = QPushButton("Yükle")
         load_btn.setProperty("role", "primary")
         load_btn.clicked.connect(self._on_load)
         sel_row.addWidget(load_btn)
@@ -70,11 +70,11 @@ class ReplayPanel(QWidget):
 
         # Info row
         info_row = QHBoxLayout()
-        self._n_frames_card = MetricCard("Frames", "", "total")
-        self._duration_card = MetricCard("Duration", "s", "session length")
-        self._position_card = MetricCard("Position", "", "current frame")
-        self._mode_card = MetricCard("Mode", "", "playback")
-        self._mode_card.set_value("PAUSE")
+        self._n_frames_card = MetricCard("Kareler", "", "toplam")
+        self._duration_card = MetricCard("Süre", "s", "oturum uzunluğu")
+        self._position_card = MetricCard("Konum", "", "mevcut kare")
+        self._mode_card = MetricCard("Mod", "", "oynatma")
+        self._mode_card.set_value("DURAKLAT")
         info_row.addWidget(self._n_frames_card)
         info_row.addWidget(self._duration_card)
         info_row.addWidget(self._position_card)
@@ -83,27 +83,27 @@ class ReplayPanel(QWidget):
 
         # Playback controls
         ctrl_row = QHBoxLayout()
-        self._play_btn = QPushButton("▶  Play")
+        self._play_btn = QPushButton("▶  Oynat")
         self._play_btn.clicked.connect(self._on_play)
-        self._pause_btn = QPushButton("⏸  Pause")
+        self._pause_btn = QPushButton("⏸  Duraklat")
         self._pause_btn.clicked.connect(self._on_pause)
-        self._step_btn = QPushButton("⏭  Step")
+        self._step_btn = QPushButton("⏭  Adım")
         self._step_btn.clicked.connect(self._on_step)
-        self._stop_btn = QPushButton("⏹  Stop")
+        self._stop_btn = QPushButton("⏹  Durdur")
         self._stop_btn.clicked.connect(self._on_stop)
         ctrl_row.addWidget(self._play_btn)
         ctrl_row.addWidget(self._pause_btn)
         ctrl_row.addWidget(self._step_btn)
         ctrl_row.addWidget(self._stop_btn)
 
-        ctrl_row.addWidget(QLabel("  Speed:"))
+        ctrl_row.addWidget(QLabel("  Hız:"))
         self._speed_combo = QComboBox()
         self._speed_combo.addItems(["0.5x", "1x", "2x", "5x", "10x", "50x"])
         self._speed_combo.setCurrentText("1x")
         self._speed_combo.currentTextChanged.connect(self._on_speed_changed)
         ctrl_row.addWidget(self._speed_combo)
 
-        ctrl_row.addWidget(QLabel("  Mode:"))
+        ctrl_row.addWidget(QLabel("  Mod:"))
         self._mode_combo = QComboBox()
         self._mode_combo.addItems(["realtime", "fast"])
         self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
@@ -149,7 +149,7 @@ class ReplayPanel(QWidget):
 
     def _on_load(self):
         if self._db is None:
-            QMessageBox.warning(self, "No DB", "Telemetry DB not connected.")
+            QMessageBox.warning(self, "DB Yok", "Telemetri veritabanı bağlı değil.")
             return
         if self._session_combo.count() == 0: return
         session_id = self._session_combo.currentData()
@@ -167,7 +167,7 @@ class ReplayPanel(QWidget):
 
         n = self._worker.load_session(self._db, session_id)
         if n == 0:
-            QMessageBox.warning(self, "Empty", "Session has no frames.")
+            QMessageBox.warning(self, "Boş", "Oturumda kare yok.")
             return
         self._total_frames = n
         self._scrubber.setRange(0, max(0, n - 1))
@@ -186,6 +186,7 @@ class ReplayPanel(QWidget):
 
         self._worker.set_mode("pause")
         self._worker.start()
+        self._mode_card.set_value("DURAKLAT")
 
     def _cleanup_worker(self):
         if self._worker is not None:
@@ -200,23 +201,23 @@ class ReplayPanel(QWidget):
         if self._worker is None: return
         mode = self._mode_combo.currentText()
         self._worker.set_mode(mode)
-        self._mode_card.set_value(mode.upper())
+        self._mode_card.set_value("OYNAT")
 
     def _on_pause(self):
         if self._worker is None: return
         self._worker.set_mode("pause")
-        self._mode_card.set_value("PAUSE")
+        self._mode_card.set_value("DURAKLAT")
 
     def _on_step(self):
         if self._worker is None: return
         self._worker.set_mode("step")
-        self._mode_card.set_value("STEP")
+        self._mode_card.set_value("ADIM")
 
     def _on_stop(self):
         if self._worker is None: return
         self._worker.set_mode("pause")
         self._worker.seek(0)
-        self._mode_card.set_value("STOP")
+        self._mode_card.set_value("DURDUR")
 
     def _on_speed_changed(self, text):
         if self._worker is None: return
@@ -229,7 +230,7 @@ class ReplayPanel(QWidget):
     def _on_mode_changed(self, text):
         if self._worker is None: return
         self._worker.set_mode(text)
-        self._mode_card.set_value(text.upper())
+        self._mode_card.set_value("OYNAT")
 
     def _on_seek(self, val):
         # Live preview during drag — just update label
@@ -261,7 +262,7 @@ class ReplayPanel(QWidget):
 
     @Slot()
     def _on_finished(self):
-        self._mode_card.set_value("END")
+        self._mode_card.set_value("BİTTİ")
 
     def _refresh_charts(self):
         self._tension_chart.refresh()

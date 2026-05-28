@@ -261,7 +261,7 @@ class SplashScreen(QDialog):
         title.setAlignment(Qt.AlignCenter)
         lay.addWidget(title)
 
-        sub = QLabel("Advanced Composite Manufacturing Platform")
+        sub = QLabel("Gelişmiş Kompozit Üretim Platformu")
         sub.setStyleSheet(f"color:{C['dim']}; font:10pt 'Segoe UI';")
         sub.setAlignment(Qt.AlignCenter)
         lay.addWidget(sub)
@@ -283,7 +283,7 @@ class SplashScreen(QDialog):
         """)
         lay.addWidget(self._progress)
 
-        self._status = QLabel("Initialising…")
+        self._status = QLabel("Başlatılıyor…")
         self._status.setStyleSheet(f"color:{C['dim']}; font:9pt Consolas;")
         self._status.setAlignment(Qt.AlignCenter)
         lay.addWidget(self._status)
@@ -312,10 +312,10 @@ class SplashScreen(QDialog):
 
     def _on_done(self, all_ok, results):
         if all_ok:
-            self._status.setText("✓  Ready to launch")
+            self._status.setText("✓  Başlatmaya hazır")
             self._status.setStyleSheet(f"color:{C['ok']}; font:bold 9pt Consolas;")
         else:
-            self._status.setText("✗  Missing required packages — see TROUBLESHOOTING.md")
+            self._status.setText("✗  Eksik paketler — TROUBLESHOOTING.md'ye bakın")
             self._status.setStyleSheet(f"color:{C['crit']}; font:bold 9pt Consolas;")
         QTimer.singleShot(600, lambda: self.ready.emit(all_ok, results))
 
@@ -385,18 +385,18 @@ class WindingPreviewWidget(QWidget):
 class PortPickerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Connect to ESP32")
+        self.setWindowTitle("ESP32'ye Bağlan")
         self.setFixedSize(380, 190)
         self.port = None; self._build()
 
     def _build(self):
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Select COM port:"))
+        lay.addWidget(QLabel("COM port seçin:"))
         self._combo = QComboBox(); self._refresh()
         lay.addWidget(self._combo)
-        r = QPushButton("Refresh"); r.clicked.connect(self._refresh)
+        r = QPushButton("Yenile"); r.clicked.connect(self._refresh)
         lay.addWidget(r)
-        note = QLabel("Baud: 921600 (fixed)  ·  Driver: CP210x or CH340")
+        note = QLabel("Baud: 921600 (sabit)  ·  Sürücü: CP210x veya CH340")
         note.setStyleSheet(f"color:{C['dim']}; font-size:9pt;")
         lay.addWidget(note)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -421,7 +421,7 @@ class PortPickerDialog(QDialog):
 class GCodeDialog(QDialog):
     def __init__(self, prog, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Sample G-code Preview"); self.setMinimumSize(660, 500)
+        self.setWindowTitle("Örnek G-code Önizleme"); self.setMinimumSize(660, 500)
         self._text = '\n'.join(prog.lines); lay = QVBoxLayout(self)
         stats = (f"Circuits: {prog.n_circuits}  ·  "
                  f"Length: {prog.total_length_mm/1000:.2f} m  ·  "
@@ -433,50 +433,50 @@ class GCodeDialog(QDialog):
         ed.setStyleSheet(f"background:{C['bg_dark']}; color:{C['text']}; border:1px solid {C['border']};")
         lay.addWidget(ed)
         row = QHBoxLayout()
-        cb = QPushButton("Copy"); cb.clicked.connect(lambda: QApplication.clipboard().setText(self._text))
-        sb = QPushButton("Save…"); sb.clicked.connect(self._save)
-        cl = QPushButton("Close"); cl.clicked.connect(self.accept)
+        cb = QPushButton("Kopyala"); cb.clicked.connect(lambda: QApplication.clipboard().setText(self._text))
+        sb = QPushButton("Kaydet…"); sb.clicked.connect(self._save)
+        cl = QPushButton("Kapat"); cl.clicked.connect(self.accept)
         row.addWidget(cb); row.addWidget(sb); row.addStretch(); row.addWidget(cl)
         lay.addLayout(row)
 
     def _save(self):
-        p, _ = QFileDialog.getSaveFileName(self, "Save G-code", "winding.nc",
-                                           "G-code (*.nc *.gcode);;All files (*)")
+        p, _ = QFileDialog.getSaveFileName(self, "G-code Kaydet", "winding.nc",
+                                           "G-code (*.nc *.gcode);;Tüm dosyalar (*)")
         if p: Path(p).write_text(self._text, encoding='utf-8')
 
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Settings"); self.setFixedSize(460, 340)
+        self.setWindowTitle("Ayarlar"); self.setFixedSize(460, 340)
         self._s = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self._build()
 
     def _build(self):
         lay = QVBoxLayout(self)
 
-        hw = QGroupBox("Hardware")
+        hw = QGroupBox("Donanım")
         hf = QFormLayout(hw)
         self._port = QLineEdit(self._s.value("port", "COM3"))
-        hf.addRow("Default port:", self._port)
-        self._autoconn = QCheckBox("Auto-connect on startup")
+        hf.addRow("Varsayılan port:", self._port)
+        self._autoconn = QCheckBox("Başlangıçta otomatik bağlan")
         self._autoconn.setChecked(self._s.value("autoconn", False, bool))
         hf.addRow("", self._autoconn)
         lay.addWidget(hw)
 
-        ws_box = QGroupBox("Workspace")
+        ws_box = QGroupBox("Çalışma Alanı")
         wf = QFormLayout(ws_box)
         self._ws_path = QLineEdit(str(WORKSPACE))
         self._ws_path.setReadOnly(True)
-        browse = QPushButton("Browse…")
+        browse = QPushButton("Gözat…")
         browse.clicked.connect(self._browse_ws)
         wr = QHBoxLayout(); wr.addWidget(self._ws_path); wr.addWidget(browse)
-        wf.addRow("Path:", wr)
+        wf.addRow("Yol:", wr)
         lay.addWidget(ws_box)
 
-        disp = QGroupBox("Display")
+        disp = QGroupBox("Görüntü")
         df = QFormLayout(disp)
-        self._opengl = QCheckBox("Enable OpenGL 3D rendering")
+        self._opengl = QCheckBox("OpenGL 3D görüntülemeyi etkinleştir")
         self._opengl.setChecked(self._s.value("opengl", True, bool))
         df.addRow("", self._opengl)
         lay.addWidget(disp)
@@ -487,7 +487,7 @@ class SettingsDialog(QDialog):
         lay.addWidget(bb)
 
     def _browse_ws(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Workspace", str(WORKSPACE))
+        d = QFileDialog.getExistingDirectory(self, "Çalışma Alanı Seç", str(WORKSPACE))
         if d: self._ws_path.setText(d)
 
     def _save(self):
@@ -551,7 +551,7 @@ class HomeScreen(QDialog):
         tl.setStyleSheet(f"font:bold 17pt 'Segoe UI'; color:{C['accent']};")
         self._status_dot = QLabel("●")
         self._status_dot.setStyleSheet(f"color:{C['ok']}; font-size:14pt;")
-        self._status_txt = QLabel("Simulation ready")
+        self._status_txt = QLabel("Simülasyon hazır")
         self._status_txt.setStyleSheet(f"color:{C['dim']}; font:9pt 'Segoe UI';")
         hl.addWidget(tl); hl.addSpacing(12)
         hl.addWidget(self._status_dot); hl.addWidget(self._status_txt)
@@ -571,7 +571,7 @@ class HomeScreen(QDialog):
         pf = QFrame()
         pf.setStyleSheet(f"background:#10151c; border:1px solid {C['border']}; border-radius:8px;")
         pfl = QVBoxLayout(pf); pfl.setContentsMargins(8, 8, 8, 8)
-        pl = QLabel("Live Path Preview")
+        pl = QLabel("Canlı Yol Önizlemesi")
         pl.setStyleSheet(f"color:{C['muted']}; font:8pt 'Segoe UI'; border:none;")
         pfl.addWidget(pl)
         self._preview = WindingPreviewWidget()
@@ -582,16 +582,16 @@ class HomeScreen(QDialog):
         right = QVBoxLayout(); right.setSpacing(10)
         body.addLayout(right, stretch=2)
 
-        ml = QLabel("Select Mode")
+        ml = QLabel("Mod Seçin")
         ml.setStyleSheet(f"font:bold 10pt 'Segoe UI'; color:{C['dim']}; border-bottom:1px solid {C['border']}; padding-bottom:4px;")
         right.addWidget(ml)
 
         modes = [
-            ("▶", "Simulation Mode",   "Full app · no hardware required",       '#1a3a5c', '#5dade2', '#1e4470'),
-            ("⚡", "Connect ESP32",     "Select COM port · live telemetry",      '#1a3a2a', '#5cb85c', '#1e4030'),
-            ("≡", "G-code Generator",  "Build winding programs · export .nc",   '#2a3038', '#e8eaed', '#323a44'),
-            ("◉", "3D Visualizer",     "Inspect fiber path on mandrel",         '#2a3038', '#e8eaed', '#323a44'),
-            ("⚙", "Settings",          "Workspace · port · display options",    '#2a3038', '#a0a8b0', '#323a44'),
+            ("▶", "Simülasyon Modu",   "Tam uygulama · donanım gerekmez",            '#1a3a5c', '#5dade2', '#1e4470'),
+            ("⚡", "ESP32 Bağla",      "COM port seç · canlı telemetri",             '#1a3a2a', '#5cb85c', '#1e4030'),
+            ("≡", "G-code Üretici",   "Sarma programı oluştur · .nc dışa aktar",    '#2a3038', '#e8eaed', '#323a44'),
+            ("◉", "3D Görüntüleyici", "Mandrel üzerinde fiber yolu incele",          '#2a3038', '#e8eaed', '#323a44'),
+            ("⚙", "Ayarlar",          "Çalışma alanı · port · görüntü seçenekleri", '#2a3038', '#a0a8b0', '#323a44'),
         ]
         self._btns = []
         for icon, title, sub, bg, fg, hv in modes:
@@ -632,7 +632,7 @@ class HomeScreen(QDialog):
             return
         os.environ.update({'FW_LINK_KIND': 'real', 'FW_LINK_PORT': dlg.port, 'FW_LINK_BAUD': '921600'})
         self._status_dot.setStyleSheet(f"color:{C['ok']}; font-size:14pt;")
-        self._status_txt.setText(f"Connected: {dlg.port}")
+        self._status_txt.setText(f"Bağlandı: {dlg.port}")
         log.info("Hardware mode selected: %s", dlg.port)
         self._launch(tab=0)
 
@@ -670,9 +670,9 @@ class HomeScreen(QDialog):
         except Exception as e:
             log.exception("Failed to launch main app")
             self.show()
-            QMessageBox.critical(self, "Launch failed",
-                f"Could not start application:\n\n{e}\n\n"
-                "Check logs/ for details or see TROUBLESHOOTING.md.")
+            QMessageBox.critical(self, "Başlatma Hatası",
+                f"Uygulama başlatılamadı:\n\n{e}\n\n"
+                "Ayrıntılar için logs/ klasörüne bakın veya TROUBLESHOOTING.md dosyasını inceleyin.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 10 · Entry point
@@ -706,10 +706,10 @@ def main() -> int:
         fails = [r for r in results if not r.ok and not r.optional]
         if fails:
             names = ', '.join(r.name for r in fails)
-            reply = QMessageBox.critical(None, "Missing dependencies",
-                f"Required packages not found:\n  {names}\n\n"
-                "Run install_deps_windows.bat then restart.\n"
-                "See TROUBLESHOOTING.md for details.",
+            reply = QMessageBox.critical(None, "Eksik bağımlılıklar",
+                f"Gerekli paketler bulunamadı:\n  {names}\n\n"
+                "install_deps_windows.bat dosyasını çalıştırın ve yeniden başlatın.\n"
+                "Ayrıntılar için TROUBLESHOOTING.md dosyasına bakın.",
                 QMessageBox.Ok | QMessageBox.Ignore)
             if reply == QMessageBox.Ok:
                 log.error("Startup aborted — missing dependencies: %s", names)

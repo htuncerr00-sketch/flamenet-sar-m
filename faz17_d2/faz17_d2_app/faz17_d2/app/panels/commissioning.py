@@ -29,26 +29,26 @@ from ..themes.dark_industrial import COLOR
 
 
 FAT_CHECKLIST = [
-    "E-stop function: stops within 100ms",
-    "STO relay drops drive enable",
-    "X axis travel 0..395mm (±0.5mm)",
-    "X axis repeatability ±0.05mm",
-    "A axis 360° (±0.1°)",
-    "A axis RPM 0-60 smooth",
-    "Encoder X resolution 3.125µm",
-    "Encoder A resolution 0.045°/pulse",
-    "Tension zero with no fiber",
-    "Tension calibration 5/10/15N (±2%)",
-    "Spindle sync phase error <1°",
-    "Soft limits X stop at -5/+395mm",
-    "Hard limits X switches trip",
-    "CAN heartbeat 100% @ 10ms",
-    "Telemetry CRC error rate <0.1%",
-    "Thermal safety halts at dT/dt>10°C/s",
-    "Brownout recovery resumes session",
-    "OTA firmware flash + verify",
-    "Dry-run winding pattern OK",
-    "First wet winding 15N±1N",
+    "E-dur işlevi: 100ms içinde durur",
+    "STO rölesi sürücü etkinleştirmesini keser",
+    "X ekseni hareketi 0..395mm (±0.5mm)",
+    "X ekseni tekrarlanabilirliği ±0.05mm",
+    "A ekseni 360° (±0.1°)",
+    "A ekseni RPM 0-60 düzgün",
+    "Enkoder X çözünürlüğü 3.125µm",
+    "Enkoder A çözünürlüğü 0.045°/pulse",
+    "Fiber olmadan gerilim sıfır",
+    "Gerilim kalibrasyonu 5/10/15N (±%2)",
+    "İş mili senkr. faz hatası <1°",
+    "Yazılım limitleri X -5/+395mm'de durur",
+    "Donanım limitleri X anahtarları devreye girer",
+    "CAN kalp atışı %100 @ 10ms",
+    "Telemetri CRC hata oranı <%0.1",
+    "Termal güvenlik dT/dt>10°C/s'de durur",
+    "Kesinti sonrası oturum devam eder",
+    "OTA firmware yükleme + doğrulama",
+    "Kuru-çalışma sarma deseni TAMAM",
+    "İlk ıslak sarma 15N±1N",
 ]
 
 
@@ -75,13 +75,13 @@ class CommissioningPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        title = QLabel("Commissioning & Calibration")
+        title = QLabel("Devreye Alma & Kalibrasyon")
         title.setProperty("role", "header")
         layout.addWidget(title)
 
         # Top row: connection + position cards
         top_row = QHBoxLayout()
-        conn_box = QGroupBox("Connection")
+        conn_box = QGroupBox("Bağlantı")
         conn_layout = QVBoxLayout(conn_box)
         self._conn_led = LedIndicator("Link", "off")
         conn_layout.addWidget(self._conn_led)
@@ -102,15 +102,15 @@ class CommissioningPanel(QWidget):
         conn_layout.addLayout(port_row)
 
         conn_btn_row = QHBoxLayout()
-        self._connect_btn = QPushButton("Connect")
+        self._connect_btn = QPushButton("Bağlan")
         self._connect_btn.setProperty("role", "primary")
         self._connect_btn.clicked.connect(self._on_connect_clicked)
-        self._disconnect_btn = QPushButton("Disconnect")
+        self._disconnect_btn = QPushButton("Bağlantıyı Kes")
         self._disconnect_btn.clicked.connect(self.disconnectRequested.emit)
         conn_btn_row.addWidget(self._connect_btn)
         conn_btn_row.addWidget(self._disconnect_btn)
         conn_layout.addLayout(conn_btn_row)
-        self._home_btn = QPushButton("$H — Home all axes")
+        self._home_btn = QPushButton("$H — Tüm eksenleri başlat")
         self._home_btn.clicked.connect(self.homeRequested.emit)
         conn_layout.addWidget(self._home_btn)
         self._state_led = LedIndicator("State", "off")
@@ -120,14 +120,14 @@ class CommissioningPanel(QWidget):
         diag_grid = QGridLayout()
         self._diag_labels = {}
         for i, (key, label) in enumerate([
-                ("frames",     "Frames OK:"),
-                ("crc",        "CRC errors:"),
-                ("sync",       "Sync errors:"),
-                ("partial",    "Partial pkts:"),
-                ("watchdog",   "Watchdog trips:"),
-                ("reconnect",  "Reconnects:"),
-                ("byte_in",    "Bytes in:"),
-                ("age",        "Frame age:"),
+                ("frames",     "Tamam kareler:"),
+                ("crc",        "CRC hataları:"),
+                ("sync",       "Senkr. hataları:"),
+                ("partial",    "Kısmi pkt:"),
+                ("watchdog",   "Bekçi sayısı:"),
+                ("reconnect",  "Yeniden bağlanma:"),
+                ("byte_in",    "Gelen bayt:"),
+                ("age",        "Kare yaşı:"),
         ]):
             diag_grid.addWidget(QLabel(label), i // 2, (i % 2) * 2)
             v = QLabel("—")
@@ -140,11 +140,11 @@ class CommissioningPanel(QWidget):
         conn_layout.addStretch()
         top_row.addWidget(conn_box)
 
-        pos_box = QGroupBox("Position")
+        pos_box = QGroupBox("Konum")
         pos_grid = QGridLayout(pos_box)
         self._x_card = MetricCard("X", "mm")
         self._a_card = MetricCard("A", "°")
-        self._t_card = MetricCard("Tension", "N")
+        self._t_card = MetricCard("Gerilim", "N")
         pos_grid.addWidget(self._x_card, 0, 0)
         pos_grid.addWidget(self._a_card, 0, 1)
         pos_grid.addWidget(self._t_card, 0, 2)
@@ -152,15 +152,15 @@ class CommissioningPanel(QWidget):
         layout.addLayout(top_row)
 
         # Jog controls
-        jog_box = QGroupBox("Manual Jog")
+        jog_box = QGroupBox("Manuel Hareket")
         jog_grid = QGridLayout(jog_box)
-        jog_grid.addWidget(QLabel("Distance:"), 0, 0)
+        jog_grid.addWidget(QLabel("Mesafe:"), 0, 0)
         self._jog_dist = QDoubleSpinBox()
         self._jog_dist.setRange(-100, 100); self._jog_dist.setValue(1.0)
         self._jog_dist.setSuffix(" mm/°"); self._jog_dist.setDecimals(2)
         jog_grid.addWidget(self._jog_dist, 0, 1)
 
-        jog_grid.addWidget(QLabel("Feed:"), 0, 2)
+        jog_grid.addWidget(QLabel("Hız:"), 0, 2)
         self._jog_feed = QDoubleSpinBox()
         self._jog_feed.setRange(50, 5000); self._jog_feed.setValue(500)
         self._jog_feed.setSuffix(" mm/min")
@@ -192,16 +192,16 @@ class CommissioningPanel(QWidget):
 
         # Calibration row
         cal_row = QHBoxLayout()
-        tens_box = QGroupBox("Tension Calibration")
+        tens_box = QGroupBox("Gerilim Kalibrasyonu")
         tens_layout = QVBoxLayout(tens_box)
-        tare_btn = QPushButton("Tare (zero load)")
+        tare_btn = QPushButton("Sıfırla (yük yok)")
         tare_btn.clicked.connect(self.tareRequested.emit)
         tens_layout.addWidget(tare_btn)
         cal_row.addWidget(tens_box)
 
-        estop_box = QGroupBox("Safety Tests")
+        estop_box = QGroupBox("Güvenlik Testleri")
         estop_layout = QVBoxLayout(estop_box)
-        estop_btn = QPushButton("⚠ E-Stop Test")
+        estop_btn = QPushButton("⚠ E-Dur Testi")
         estop_btn.setProperty("role", "danger")
         estop_btn.clicked.connect(self.estopRequested.emit)
         estop_layout.addWidget(estop_btn)
@@ -209,7 +209,7 @@ class CommissioningPanel(QWidget):
         layout.addLayout(cal_row)
 
         # FAT checklist
-        fat_box = QGroupBox(f"FAT Checklist ({len(FAT_CHECKLIST)} items)")
+        fat_box = QGroupBox(f"FAT Kontrol Listesi ({len(FAT_CHECKLIST)} madde)")
         fat_layout = QVBoxLayout(fat_box)
         self._fat_list = QListWidget()
         for item_text in FAT_CHECKLIST:
@@ -219,7 +219,7 @@ class CommissioningPanel(QWidget):
             self._fat_list.addItem(it)
         self._fat_list.itemChanged.connect(self._update_fat_progress)
         fat_layout.addWidget(self._fat_list)
-        self._fat_progress_lbl = QLabel("0 / 0 items checked")
+        self._fat_progress_lbl = QLabel("0 / 0 madde işaretlendi")
         fat_layout.addWidget(self._fat_progress_lbl)
         self._update_fat_progress()
         layout.addWidget(fat_box, stretch=1)
@@ -233,7 +233,7 @@ class CommissioningPanel(QWidget):
         n_checked = sum(1 for i in range(self._fat_list.count())
                         if self._fat_list.item(i).checkState() == Qt.Checked)
         n_total = self._fat_list.count()
-        self._fat_progress_lbl.setText(f"{n_checked} / {n_total} items checked")
+        self._fat_progress_lbl.setText(f"{n_checked} / {n_total} madde işaretlendi")
         if n_checked == n_total:
             self._fat_progress_lbl.setProperty("status", "ok")
         else:
@@ -250,14 +250,14 @@ class CommissioningPanel(QWidget):
         state_status = "fatal" if state_name == "ESTOP" else (
                        "ok" if state_name in ("READY", "RUNNING") else "warn")
         self._state_led.set_status(state_status)
-        self._state_led.set_text(f"State: {state_name}")
+        self._state_led.set_text(f"Durum: {state_name}")
 
     @Slot(int)
     def on_connection_state(self, state: int):
         statuses = {0: "off", 1: "warn", 2: "ok", 3: "crit"}
-        names = {0: "Disconnected", 1: "Connecting", 2: "Connected", 3: "Error"}
+        names = {0: "Bağlı değil", 1: "Bağlanıyor", 2: "Bağlandı", 3: "Hata"}
         self._conn_led.set_status(statuses.get(state, "off"))
-        self._conn_led.set_text(f"Link: {names.get(state, '?')}")
+        self._conn_led.set_text(f"Bağlantı: {names.get(state, '?')}")
 
     @Slot()
     def _on_connect_clicked(self):

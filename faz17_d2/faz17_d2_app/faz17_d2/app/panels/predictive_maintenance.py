@@ -46,31 +46,31 @@ class PredictiveMaintenancePanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        title = QLabel("Predictive Maintenance")
+        title = QLabel("Tahminsel Bakım")
         title.setProperty("role", "header")
         layout.addWidget(title)
 
         # KPI row
         kpi_row = QHBoxLayout()
         self._health_card = MetricCard(
-            "System Health", "%", "weighted average", large=True)
+            "Sistem Sağlığı", "%", "ağırlıklı ortalama", large=True)
         self._minrul_card = MetricCard(
-            "Min RUL", "h", "weakest component", large=True)
+            "Min RUL", "h", "en zayıf bileşen", large=True)
         self._actions_card = MetricCard(
-            "Open actions", "", "scheduled tasks")
+            "Açık görevler", "", "planlanmış görevler")
         self._runtime_card = MetricCard(
-            "Runtime", "h", "session")
+            "Çalışma süresi", "h", "oturum")
         for c in (self._health_card, self._minrul_card,
                   self._actions_card, self._runtime_card):
             kpi_row.addWidget(c)
         layout.addLayout(kpi_row)
 
         # Components grid (bars + RUL)
-        comp_box = QGroupBox("Component Health")
+        comp_box = QGroupBox("Bileşen Sağlığı")
         comp_layout = QVBoxLayout(comp_box)
         self._comp_table = QTableWidget(0, 4)
         self._comp_table.setHorizontalHeaderLabels(
-            ["Component", "Health", "RUL", "Runtime"])
+            ["Bileşen", "Sağlık", "RUL", "Çalışma süresi"])
         self._comp_table.horizontalHeader().setStretchLastSection(True)
         self._comp_table.verticalHeader().setVisible(False)
         self._comp_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -78,7 +78,7 @@ class PredictiveMaintenancePanel(QWidget):
         layout.addWidget(comp_box, stretch=1)
 
         # Trend chart
-        trend_box = QGroupBox("System Health Trend")
+        trend_box = QGroupBox("Sistem Sağlığı Trendi")
         trend_layout = QVBoxLayout(trend_box)
         self._trend_chart = RealtimeChart(
             "", "%", y_range=(0, 100), max_points=600,

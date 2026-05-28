@@ -39,7 +39,7 @@ class RecipeEditor(QWidget):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(8)
 
-        title = QLabel("Process Recipe Editor")
+        title = QLabel("Proses Reçete Düzenleyici")
         title.setProperty("role", "header")
         outer.addWidget(title)
 
@@ -52,14 +52,14 @@ class RecipeEditor(QWidget):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(4)
-        left_layout.addWidget(QLabel("Saved Recipes"))
+        left_layout.addWidget(QLabel("Kayıtlı Reçeteler"))
         self._list = QListWidget()
         self._list.itemClicked.connect(self._on_list_clicked)
         left_layout.addWidget(self._list)
         list_btn_row = QHBoxLayout()
-        new_btn = QPushButton("New")
+        new_btn = QPushButton("Yeni")
         new_btn.clicked.connect(self._on_new)
-        del_btn = QPushButton("Delete")
+        del_btn = QPushButton("Sil")
         del_btn.clicked.connect(self._on_delete)
         list_btn_row.addWidget(new_btn)
         list_btn_row.addWidget(del_btn)
@@ -73,28 +73,28 @@ class RecipeEditor(QWidget):
         right_layout.setSpacing(8)
 
         # Identity
-        id_box = QGroupBox("Recipe Identification")
+        id_box = QGroupBox("Reçete Kimliği")
         id_grid = QGridLayout(id_box)
-        id_grid.addWidget(QLabel("Recipe ID:"), 0, 0)
+        id_grid.addWidget(QLabel("Reçete No:"), 0, 0)
         self._id_edit = QLineEdit(); self._id_edit.setPlaceholderText("EP120_T700_v1")
         id_grid.addWidget(self._id_edit, 0, 1)
-        id_grid.addWidget(QLabel("Version:"), 0, 2)
+        id_grid.addWidget(QLabel("Sürüm:"), 0, 2)
         self._ver_spin = QSpinBox(); self._ver_spin.setRange(1, 9999)
         id_grid.addWidget(self._ver_spin, 0, 3)
-        id_grid.addWidget(QLabel("Name:"), 1, 0)
+        id_grid.addWidget(QLabel("Ad:"), 1, 0)
         self._name_edit = QLineEdit()
         id_grid.addWidget(self._name_edit, 1, 1, 1, 3)
         right_layout.addWidget(id_box)
 
         # Materials
-        mat_box = QGroupBox("Materials")
+        mat_box = QGroupBox("Malzemeler")
         mat_grid = QGridLayout(mat_box)
-        mat_grid.addWidget(QLabel("Resin system:"), 0, 0)
+        mat_grid.addWidget(QLabel("Reçine sistemi:"), 0, 0)
         self._resin_combo = QComboBox()
         self._resin_combo.addItems(
             ["EPON828_Ancamine2049", "VinylEster_Derakane510", "Custom"])
         mat_grid.addWidget(self._resin_combo, 0, 1)
-        mat_grid.addWidget(QLabel("Fiber:"), 1, 0)
+        mat_grid.addWidget(QLabel("Fiber:"), 1, 0)  # same in Turkish
         self._fiber_combo = QComboBox()
         self._fiber_combo.addItems(
             ["Toray T700SC-12K", "Toray T800SC-24K", "Glass E-glass-2400", "Custom"])
@@ -102,26 +102,26 @@ class RecipeEditor(QWidget):
         right_layout.addWidget(mat_box)
 
         # Winding
-        wind_box = QGroupBox("Winding Parameters")
+        wind_box = QGroupBox("Sarma Parametreleri")
         wind_grid = QGridLayout(wind_box)
-        wind_grid.addWidget(QLabel("Winding angle α:"), 0, 0)
+        wind_grid.addWidget(QLabel("Sarma açısı α:"), 0, 0)
         self._alpha_spin = QDoubleSpinBox()
         self._alpha_spin.setRange(1.0, 89.0); self._alpha_spin.setDecimals(2)
         self._alpha_spin.setSuffix(" °"); self._alpha_spin.setValue(10.17)
         wind_grid.addWidget(self._alpha_spin, 0, 1)
 
-        wind_grid.addWidget(QLabel("Layers:"), 0, 2)
+        wind_grid.addWidget(QLabel("Katmanlar:"), 0, 2)
         self._layers_spin = QSpinBox()
         self._layers_spin.setRange(1, 50); self._layers_spin.setValue(8)
         wind_grid.addWidget(self._layers_spin, 0, 3)
 
-        wind_grid.addWidget(QLabel("Tension:"), 1, 0)
+        wind_grid.addWidget(QLabel("Gerilim:"), 1, 0)
         self._tension_spin = QDoubleSpinBox()
         self._tension_spin.setRange(3.0, 38.0); self._tension_spin.setDecimals(2)
         self._tension_spin.setSuffix(" N"); self._tension_spin.setValue(15.0)
         wind_grid.addWidget(self._tension_spin, 1, 1)
 
-        wind_grid.addWidget(QLabel("Feed rate:"), 1, 2)
+        wind_grid.addWidget(QLabel("İlerleme hızı:"), 1, 2)
         self._feed_spin = QDoubleSpinBox()
         self._feed_spin.setRange(10.0, 200.0); self._feed_spin.setDecimals(1)
         self._feed_spin.setSuffix(" mm/s"); self._feed_spin.setValue(100.0)
@@ -129,15 +129,15 @@ class RecipeEditor(QWidget):
         right_layout.addWidget(wind_box)
 
         # Cure cycle
-        cure_box = QGroupBox("Cure Cycle")
+        cure_box = QGroupBox("Kürleme Döngüsü")
         cure_grid = QGridLayout(cure_box)
-        cure_grid.addWidget(QLabel("Cure temperature:"), 0, 0)
+        cure_grid.addWidget(QLabel("Kürleme sıcaklığı:"), 0, 0)
         self._cureT_spin = QDoubleSpinBox()
         self._cureT_spin.setRange(20.0, 200.0); self._cureT_spin.setDecimals(1)
         self._cureT_spin.setSuffix(" °C"); self._cureT_spin.setValue(120.0)
         cure_grid.addWidget(self._cureT_spin, 0, 1)
 
-        cure_grid.addWidget(QLabel("Cure duration:"), 0, 2)
+        cure_grid.addWidget(QLabel("Kürleme süresi:"), 0, 2)
         self._cureH_spin = QDoubleSpinBox()
         self._cureH_spin.setRange(0.5, 48.0); self._cureH_spin.setDecimals(1)
         self._cureH_spin.setSuffix(" h"); self._cureH_spin.setValue(8.0)
@@ -145,15 +145,15 @@ class RecipeEditor(QWidget):
         right_layout.addWidget(cure_box)
 
         # Quality targets
-        q_box = QGroupBox("Quality Targets")
+        q_box = QGroupBox("Kalite Hedefleri")
         q_grid = QGridLayout(q_box)
-        q_grid.addWidget(QLabel("Vf target:"), 0, 0)
+        q_grid.addWidget(QLabel("Vf hedef:"), 0, 0)
         self._vf_spin = QDoubleSpinBox()
         self._vf_spin.setRange(0.30, 0.75); self._vf_spin.setDecimals(3)
         self._vf_spin.setSingleStep(0.01); self._vf_spin.setValue(0.55)
         q_grid.addWidget(self._vf_spin, 0, 1)
 
-        q_grid.addWidget(QLabel("Void max:"), 0, 2)
+        q_grid.addWidget(QLabel("Boşluk max:"), 0, 2)
         self._void_spin = QDoubleSpinBox()
         self._void_spin.setRange(0.1, 10.0); self._void_spin.setDecimals(2)
         self._void_spin.setSuffix(" %"); self._void_spin.setValue(2.5)
@@ -161,10 +161,10 @@ class RecipeEditor(QWidget):
         right_layout.addWidget(q_box)
 
         # Notes
-        notes_box = QGroupBox("Notes")
+        notes_box = QGroupBox("Notlar")
         notes_layout = QVBoxLayout(notes_box)
         self._notes_edit = QPlainTextEdit()
-        self._notes_edit.setPlaceholderText("Operator notes, batch context, …")
+        self._notes_edit.setPlaceholderText("Operatör notları, parti bağlamı, …")
         self._notes_edit.setMaximumHeight(80)
         notes_layout.addWidget(self._notes_edit)
         right_layout.addWidget(notes_box)
@@ -177,16 +177,16 @@ class RecipeEditor(QWidget):
         # Action row
         save_row = QHBoxLayout()
         save_row.addStretch()
-        validate_btn = QPushButton("Validate")
+        validate_btn = QPushButton("Doğrula")
         validate_btn.clicked.connect(self._on_validate)
         save_row.addWidget(validate_btn)
 
-        gcode_btn = QPushButton("Generate G-code…")
-        gcode_btn.setToolTip("Generate helical winding G-code from current parameters")
+        gcode_btn = QPushButton("G-code Oluştur…")
+        gcode_btn.setToolTip("Mevcut parametrelerden sarmal sarma G-code'u oluştur")
         gcode_btn.clicked.connect(self._on_generate_gcode)
         save_row.addWidget(gcode_btn)
 
-        self._save_btn = QPushButton("Save Recipe")
+        self._save_btn = QPushButton("Reçete Kaydet")
         self._save_btn.setProperty("role", "primary")
         self._save_btn.clicked.connect(self._on_save)
         save_row.addWidget(self._save_btn)
@@ -238,42 +238,42 @@ class RecipeEditor(QWidget):
         errs = r.validate()
         if errs:
             self._validation_lbl.setText(
-                "Validation errors: " + ", ".join(errs))
+                "Doğrulama hataları: " + ", ".join(errs))
             self._validation_lbl.setProperty("status", "crit")
         else:
-            self._validation_lbl.setText(f"✓ Recipe valid. Checksum: {r.checksum()}")
+            self._validation_lbl.setText(f"✓ Reçete geçerli. Sağlama toplamı: {r.checksum()}")
             self._validation_lbl.setProperty("status", "ok")
         self._validation_lbl.style().unpolish(self._validation_lbl)
         self._validation_lbl.style().polish(self._validation_lbl)
 
     def _on_save(self):
         if self._db is None:
-            QMessageBox.warning(self, "No DB", "Recipe DB not connected.")
+            QMessageBox.warning(self, "DB Yok", "Reçete veritabanı bağlı değil.")
             return
         r = self._current_recipe()
         errs = r.validate()
         if errs:
-            QMessageBox.warning(self, "Invalid recipe", "\n".join(errs))
+            QMessageBox.warning(self, "Geçersiz reçete", "\n".join(errs))
             return
         if not r.recipe_id:
-            QMessageBox.warning(self, "Missing ID", "Recipe ID is required.")
+            QMessageBox.warning(self, "Eksik kimlik", "Reçete kimliği gereklidir.")
             return
         if self._db.save(r):
             self._refresh_list()
             self.recipeSaved.emit(r)
-            self._validation_lbl.setText("✓ Saved.")
+            self._validation_lbl.setText("✓ Kaydedildi.")
             self._validation_lbl.setProperty("status", "ok")
             self._validation_lbl.style().unpolish(self._validation_lbl)
             self._validation_lbl.style().polish(self._validation_lbl)
         else:
-            QMessageBox.critical(self, "Save failed", "Save to DB failed.")
+            QMessageBox.critical(self, "Kayıt başarısız", "Veritabanına kayıt başarısız.")
 
     def _on_generate_gcode(self):
         r = self._current_recipe()
         errs = r.validate()
         if errs:
-            QMessageBox.warning(self, "Invalid parameters",
-                "Fix these errors before generating G-code:\n\n" + "\n".join(errs))
+            QMessageBox.warning(self, "Geçersiz parametreler",
+                "G-code oluşturmadan önce bu hataları düzeltin:\n\n" + "\n".join(errs))
             return
         try:
             from backend.core.winding_planner import WindingParams, generate_helical
@@ -288,7 +288,7 @@ class RecipeEditor(QWidget):
             )
             prog = generate_helical(params)
         except Exception as e:
-            QMessageBox.critical(self, "G-code generation failed", str(e))
+            QMessageBox.critical(self, "G-code oluşturma başarısız", str(e))
             return
 
         dlg = _GCodeViewDialog(prog, r, self)
@@ -304,8 +304,8 @@ class RecipeEditor(QWidget):
         cur = self._list.currentItem()
         if cur is None or self._db is None: return
         rid = cur.data(Qt.UserRole)
-        reply = QMessageBox.question(self, "Delete",
-            f"Delete all versions of recipe '{rid}'?")
+        reply = QMessageBox.question(self, "Sil",
+            f"'{rid}' reçetesinin tüm sürümleri silinsin mi?")
         if reply == QMessageBox.Yes:
             self._db.delete(rid)
             self._refresh_list()
@@ -344,13 +344,13 @@ class _GCodeViewDialog(QDialog):
 
         # Stats header
         stats = (
-            f"Recipe: {getattr(recipe, 'recipe_id', '—')}  ·  "
+            f"Reçete: {getattr(recipe, 'recipe_id', '—')}  ·  "
             f"α={recipe.alpha_deg:.2f}°  ·  "
-            f"Layers: {recipe.n_layers}  ·  "
-            f"Tension: {recipe.tension_N:.1f} N  ·  "
-            f"Circuits: {prog.n_circuits}  ·  "
-            f"Length: {prog.total_length_mm / 1000:.2f} m  ·  "
-            f"Est. time: {prog.estimated_time_s / 60:.1f} min"
+            f"Katmanlar: {recipe.n_layers}  ·  "
+            f"Gerilim: {recipe.tension_N:.1f} N  ·  "
+            f"Devreler: {prog.n_circuits}  ·  "
+            f"Uzunluk: {prog.total_length_mm / 1000:.2f} m  ·  "
+            f"Tahmini süre: {prog.estimated_time_s / 60:.1f} dk"
         )
         stats_lbl = QLabel(stats)
         stats_lbl.setWordWrap(True)
@@ -368,12 +368,12 @@ class _GCodeViewDialog(QDialog):
 
         # Buttons
         btn_row = QHBoxLayout()
-        copy_btn = QPushButton("Copy to Clipboard")
+        copy_btn = QPushButton("Panoya Kopyala")
         copy_btn.clicked.connect(self._copy)
-        save_btn = QPushButton("Save to File…")
+        save_btn = QPushButton("Dosyaya Kaydet…")
         save_btn.setProperty("role", "primary")
         save_btn.clicked.connect(self._save)
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton("Kapat")
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(copy_btn)
         btn_row.addWidget(save_btn)
@@ -388,8 +388,8 @@ class _GCodeViewDialog(QDialog):
     def _save(self):
         rid = self.windowTitle().replace("G-code — ", "").replace(" ", "_") or "winding"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save G-code", f"{rid}.nc",
-            "G-code files (*.nc *.gcode *.txt);;All files (*)")
+            self, "G-code Kaydet", f"{rid}.nc",
+            "G-code dosyaları (*.nc *.gcode *.txt);;Tüm dosyalar (*)")
         if path:
             Path(path).write_text(self._editor.toPlainText(), encoding='utf-8')
-            QMessageBox.information(self, "Saved", f"G-code saved:\n{path}")
+            QMessageBox.information(self, "Kaydedildi", f"G-code kaydedildi:\n{path}")

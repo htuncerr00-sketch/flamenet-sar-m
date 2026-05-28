@@ -49,7 +49,7 @@ class FilamentWindingApp(QMainWindow):
                  link_config: Optional[LinkConfig] = None):
         super().__init__()
         self._headless = headless
-        self.setWindowTitle("Filament Winding Control")
+        self.setWindowTitle("Filament Sarma Kontrolü")
         self.resize(1600, 1000)
 
         # Backend stack — link is factory-driven (Mock or Real per config)
@@ -123,13 +123,13 @@ class FilamentWindingApp(QMainWindow):
         self._panel_commission = CommissioningPanel(self._motion, self._link)
         self._panel_pm = PredictiveMaintenancePanel(self._pm)
 
-        self._tabs.addTab(self._panel_live, "Live Production")
-        self._tabs.addTab(self._panel_3d, "3D Visualizer")
-        self._tabs.addTab(self._panel_alarms, "Alarms & Safety")
-        self._tabs.addTab(self._panel_replay, "Replay")
-        self._tabs.addTab(self._panel_recipe, "Recipe Editor")
-        self._tabs.addTab(self._panel_commission, "Commissioning")
-        self._tabs.addTab(self._panel_pm, "Predictive Maint.")
+        self._tabs.addTab(self._panel_live, "Canlı Üretim")
+        self._tabs.addTab(self._panel_3d, "3D Görüntüleyici")
+        self._tabs.addTab(self._panel_alarms, "Alarmlar & Güvenlik")
+        self._tabs.addTab(self._panel_replay, "Tekrar Oynat")
+        self._tabs.addTab(self._panel_recipe, "Reçete Düzenleyici")
+        self._tabs.addTab(self._panel_commission, "Devreye Alma")
+        self._tabs.addTab(self._panel_pm, "Tahminsel Bakım")
 
         # Menu bar
         self._build_menus()
@@ -143,24 +143,24 @@ class FilamentWindingApp(QMainWindow):
     def _build_menus(self):
         menu = self.menuBar()
 
-        file_menu = menu.addMenu("&File")
-        new_session = QAction("New session", self)
+        file_menu = menu.addMenu("&Dosya")
+        new_session = QAction("Yeni oturum", self)
         new_session.setShortcut(QKeySequence.New)
         new_session.triggered.connect(self._on_new_session)
         file_menu.addAction(new_session)
 
-        save_layout = QAction("Save layout", self)
+        save_layout = QAction("Düzeni kaydet", self)
         save_layout.triggered.connect(self._save_layout)
         file_menu.addAction(save_layout)
 
         file_menu.addSeparator()
-        quit_action = QAction("Exit", self)
+        quit_action = QAction("Çıkış", self)
         quit_action.setShortcut(QKeySequence.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
         # View menu — tab selection
-        view_menu = menu.addMenu("&View")
+        view_menu = menu.addMenu("&Görünüm")
         for i in range(self._tabs.count()):
             label = self._tabs.tabText(i)
             act = QAction(label, self)
@@ -169,39 +169,39 @@ class FilamentWindingApp(QMainWindow):
             view_menu.addAction(act)
 
         # Help menu
-        help_menu = menu.addMenu("&Help")
-        about = QAction("About", self)
+        help_menu = menu.addMenu("&Yardım")
+        about = QAction("Hakkında", self)
         about.triggered.connect(self._on_about)
         help_menu.addAction(about)
 
     def _build_toolbar(self):
-        tb = QToolBar("Main")
+        tb = QToolBar("Ana")
         tb.setObjectName("MainToolBar")
         tb.setMovable(False)
         self.addToolBar(tb)
-        connect_act = QAction("Connect", self)
+        connect_act = QAction("Bağlan", self)
         connect_act.triggered.connect(self._on_connect)
         tb.addAction(connect_act)
-        home_act = QAction("Home", self)
+        home_act = QAction("Başlangıç Konumu", self)
         home_act.triggered.connect(self._on_home)
         tb.addAction(home_act)
-        record_act = QAction("● Record", self)
+        record_act = QAction("● Kayıt", self)
         record_act.setCheckable(True)
         record_act.triggered.connect(self._on_toggle_record)
         tb.addAction(record_act)
         self._record_act = record_act
         tb.addSeparator()
-        estop_act = QAction("⚠ ESTOP", self)
+        estop_act = QAction("⚠ ACİL DURDUR", self)
         estop_act.triggered.connect(self._on_estop)
         tb.addAction(estop_act)
 
     def _build_statusbar(self):
         sb = QStatusBar()
         self.setStatusBar(sb)
-        self._sb_conn = QLabel("Disconnected")
-        self._sb_frames = QLabel("0 frames")
-        self._sb_drops = QLabel("0 drops")
-        self._sb_alarms = QLabel("0 alarms")
+        self._sb_conn = QLabel("Bağlı değil")
+        self._sb_frames = QLabel("0 kare")
+        self._sb_drops = QLabel("0 kayıp")
+        self._sb_alarms = QLabel("0 alarm")
         self._sb_fps = QLabel("--")
         sb.addPermanentWidget(self._sb_conn)
         sb.addPermanentWidget(self._sb_frames)
@@ -353,8 +353,8 @@ class FilamentWindingApp(QMainWindow):
         if self._telem_db.start_session(session_id):
             self._recording = True
             self._record_act.setChecked(True)
-            QMessageBox.information(self, "Session started",
-                f"Recording: {session_id}")
+            QMessageBox.information(self, "Oturum başladı",
+                f"Kaydediliyor: {session_id}")
 
     @Slot(bool)
     def _on_toggle_record(self, checked: bool):
@@ -368,21 +368,21 @@ class FilamentWindingApp(QMainWindow):
             self._recording = False
             if meta:
                 self._panel_replay._refresh_session_list()
-                QMessageBox.information(self, "Session saved",
-                    f"{meta.session_id}: {meta.n_frames} frames, "
-                    f"{meta.compressed} bytes compressed "
-                    f"({meta.compressed*100/max(meta.n_bytes,1):.1f}% ratio)")
+                QMessageBox.information(self, "Oturum kaydedildi",
+                    f"{meta.session_id}: {meta.n_frames} kare, "
+                    f"{meta.compressed} bayt sıkıştırılmış "
+                    f"({meta.compressed*100/max(meta.n_bytes,1):.1f}% oran)")
 
     @Slot(object)
     def _on_alarm_status(self, ev):
         n = self._panel_alarms._alarm_list.event_count()
-        self._sb_alarms.setText(f"{n} alarms")
+        self._sb_alarms.setText(f"{n} alarm")
         if self._safety.is_halted:
             self._panel_live.set_safety_status("fatal")
 
     @Slot(int)
     def _on_connection_state(self, state: int):
-        names = {0: "Disconnected", 1: "Connecting", 2: "Connected", 3: "Error"}
+        names = {0: "Bağlı değil", 1: "Bağlanıyor", 2: "Bağlandı", 3: "Hata"}
         self._sb_conn.setText(names.get(state, "?"))
 
         # Auto-record: start a session when we transition to CONNECTED,
@@ -407,7 +407,7 @@ class FilamentWindingApp(QMainWindow):
             self._recording = True
             if hasattr(self, "_record_act"):
                 self._record_act.setChecked(True)
-            self._sb_conn.setText(f"Connected · rec {session_id}")
+            self._sb_conn.setText(f"Bağlandı · kay {session_id}")
 
     def _auto_record_stop(self) -> None:
         """Close telemetry session on link disconnect."""
@@ -425,11 +425,11 @@ class FilamentWindingApp(QMainWindow):
 
     @Slot(dict)
     def _on_stats(self, stats: dict):
-        self._sb_frames.setText(f"{stats.get('received',0)} frames")
-        self._sb_drops.setText(f"{stats.get('dropped',0)} drops")
+        self._sb_frames.setText(f"{stats.get('received',0)} kare")
+        self._sb_drops.setText(f"{stats.get('dropped',0)} kayıp")
         # FPS from live panel
         fps = self._panel_live.current_fps()
-        self._sb_fps.setText(f"UI {fps:.0f} FPS")
+        self._sb_fps.setText(f"Arayüz {fps:.0f} FPS")
 
     @Slot(object)
     def _on_recipe_loaded(self, r):
@@ -473,10 +473,10 @@ class FilamentWindingApp(QMainWindow):
             self._tabs.setCurrentIndex(tab)
 
     def _on_about(self):
-        QMessageBox.about(self, "About",
-            "<h2>Filament Winding Control</h2>"
-            "<p>Faz 17 — Production-Grade Desktop App</p>"
-            "<p>Built on Faz 1–16 backend stack.</p>")
+        QMessageBox.about(self, "Hakkında",
+            "<h2>Filament Sarma Kontrolü</h2>"
+            "<p>Faz 17 — Üretim Kalitesinde Masaüstü Uygulaması</p>"
+            "<p>Faz 1–16 arka uç katmanı üzerine inşa edilmiştir.</p>")
 
     def closeEvent(self, ev):
         """Async-safe shutdown."""

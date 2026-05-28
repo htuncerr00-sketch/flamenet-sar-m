@@ -58,14 +58,14 @@ class LiveProductionPanel(QWidget):
 
         # Title row with status LEDs
         title_row = QHBoxLayout()
-        title_lbl = QLabel("Live Production")
+        title_lbl = QLabel("Canlı Üretim")
         title_lbl.setProperty("role", "header")
         title_row.addWidget(title_lbl)
         title_row.addStretch()
-        self._connection_led = LedIndicator("Link", "off")
-        self._safety_led = LedIndicator("Safety", "ok")
-        self._running_led = LedIndicator("Running", "off")
-        self._fps_lbl = QLabel("UI: -- FPS")
+        self._connection_led = LedIndicator("Bağlantı", "off")
+        self._safety_led = LedIndicator("Güvenlik", "ok")
+        self._running_led = LedIndicator("Çalışıyor", "off")
+        self._fps_lbl = QLabel("Arayüz: -- FPS")
         self._fps_lbl.setProperty("role", "caption")
         title_row.addWidget(self._connection_led)
         title_row.addWidget(self._safety_led)
@@ -76,13 +76,13 @@ class LiveProductionPanel(QWidget):
         # Metric cards row
         metric_row = QHBoxLayout()
         metric_row.setSpacing(6)
-        self._tension_card = MetricCard("Tension", "N", "target 15.0", large=True)
-        self._rpm_card = MetricCard("RPM", "rpm", "spindle", large=True)
-        self._x_card = MetricCard("X Position", "mm", "carriage", large=True)
-        self._angle_card = MetricCard("Angle", "°", "winding")
-        self._temp_card = MetricCard("Temperature", "°C", "process")
-        self._vib_card = MetricCard("Vibration", "g RMS", "3-axis")
-        self._quality_card = MetricCard("Quality", "", "estimator")
+        self._tension_card = MetricCard("Gerilim", "N", "hedef 15.0", large=True)
+        self._rpm_card = MetricCard("RPM", "rpm", "iş mili", large=True)
+        self._x_card = MetricCard("X Konumu", "mm", "taşıyıcı", large=True)
+        self._angle_card = MetricCard("Açı", "°", "sarma")
+        self._temp_card = MetricCard("Sıcaklık", "°C", "proses")
+        self._vib_card = MetricCard("Titreşim", "g RMS", "3-eksen")
+        self._quality_card = MetricCard("Kalite", "", "tahmin")
         for card in (self._tension_card, self._rpm_card, self._x_card,
                      self._angle_card, self._temp_card, self._vib_card,
                      self._quality_card):
@@ -95,7 +95,7 @@ class LiveProductionPanel(QWidget):
         pens = chart_pen_colors()
 
         self._tension_chart = RealtimeChart(
-            "Tension (N)", "N", y_range=(0, 40),
+            "Gerilim (N)", "N", y_range=(0, 40),
             max_points=self.HISTORY_POINTS, pen_colors=pens)
         self._tension_chart.add_series("tension", color=pens["tension"])
 
@@ -105,11 +105,11 @@ class LiveProductionPanel(QWidget):
         self._rpm_chart.add_series("rpm", color=pens["rpm"])
 
         self._temp_chart = RealtimeChart(
-            "Temperature (°C)", "°C", y_range=None,
+            "Sıcaklık (°C)", "°C", y_range=None,
             max_points=self.HISTORY_POINTS, pen_colors=pens)
         self._temp_chart.add_series("temp", color=pens["temp"])
 
-        self._fft_chart = FFTChart("Vibration FFT (Z-axis)")
+        self._fft_chart = FFTChart("Titreşim FFT (Z-ekseni)")
 
         charts_grid.addWidget(self._tension_chart, 0, 0)
         charts_grid.addWidget(self._rpm_chart, 0, 1)
@@ -168,9 +168,9 @@ class LiveProductionPanel(QWidget):
     @Slot(int)
     def on_connection_state(self, state: int):
         statuses = {0: "off", 1: "warn", 2: "ok", 3: "crit"}
-        names = {0: "Disconnected", 1: "Connecting", 2: "Connected", 3: "Error"}
+        names = {0: "Bağlı değil", 1: "Bağlanıyor", 2: "Bağlandı", 3: "Hata"}
         self._connection_led.set_status(statuses.get(state, "off"))
-        self._connection_led.set_text(f"Link: {names.get(state, '?')}")
+        self._connection_led.set_text(f"Bağlantı: {names.get(state, '?')}")
 
     def set_safety_status(self, status: str):
         self._safety_led.set_status(status)
@@ -200,7 +200,7 @@ class LiveProductionPanel(QWidget):
         elapsed = time.monotonic() - self._fps_t0
         if elapsed > 1.0:
             self._fps = self._fps_frames / elapsed
-            self._fps_lbl.setText(f"UI: {self._fps:.1f} FPS")
+            self._fps_lbl.setText(f"Arayüz: {self._fps:.1f} FPS")
             self._fps_frames = 0
             self._fps_t0 = time.monotonic()
 
