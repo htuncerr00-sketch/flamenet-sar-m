@@ -58,6 +58,7 @@ ${FAZ19B}/main/ina226.c \
 ${FAZ19B}/main/mpu6050.c \
 ${FAZ19B}/main/thermal.c \
 ${FAZ19C_MAIN}/sensor_pipeline.c \
+${FAZ19C_MAIN}/can_bridge.c \
 ${FAZ19B}/main/telemetry_protocol.c"
 
     "test_race_cache:\
@@ -68,6 +69,7 @@ ${FAZ19B}/main/ina226.c \
 ${FAZ19B}/main/mpu6050.c \
 ${FAZ19B}/main/thermal.c \
 ${FAZ19C_MAIN}/sensor_pipeline.c \
+${FAZ19C_MAIN}/can_bridge.c \
 ${FAZ19B}/main/telemetry_protocol.c"
 
     # ── Faz 19C safety_monitor suite ──

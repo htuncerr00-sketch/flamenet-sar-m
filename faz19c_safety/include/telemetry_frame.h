@@ -72,7 +72,8 @@
 #define TELEM_FLAG_BROWNOUT          (1u << 12)
 #define TELEM_FLAG_THERMAL_SHUTDOWN  (1u << 13)
 #define TELEM_FLAG_WATCHDOG_RESET    (1u << 14)
-#define TELEM_FLAG_RESERVED_15       (1u << 15)
+/* CAN/TWAI ESC bridge fault (Faz 19D) */
+#define TELEM_FLAG_ESC_FAULT         (1u << 15)
 
 /*
  * Host-friendly logical struct. NOT used for wire — wire format is

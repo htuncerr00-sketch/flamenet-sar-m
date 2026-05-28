@@ -15,6 +15,7 @@
 #include "uart_stream.h"
 #include "health_monitor.h"
 #include "safety_monitor.h"
+#include "can_bridge.h"
 
 #ifdef ESP_PLATFORM
 #include "esp_log.h"
@@ -32,6 +33,17 @@ void app_main(void) {
     if (uart_stream_init() != 0) {
         ESP_LOGE(TAG, "UART init failed; halting");
         return;
+    }
+
+    /* Step 2.5: CAN/TWAI ESC bridge (Faz 19D) */
+    can_bridge_config_t can_cfg = CAN_BRIDGE_CONFIG_DEFAULT();
+    if (can_bridge_init(&can_cfg) != 0) {
+        ESP_LOGW(TAG, "can_bridge_init failed — ESC bridge offline");
+    } else {
+        can_bridge_start();
+        ESP_LOGI(TAG, "CAN bridge started: TX=GPIO%d RX=GPIO%d @ %lu bps",
+                 can_cfg.tx_gpio, can_cfg.rx_gpio,
+                 (unsigned long)can_cfg.bitrate);
     }
 
     /* Step 3: telemetry + sensor tasks */

@@ -20,6 +20,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "sensor_pipeline.h"
 #include "telemetry_frame.h"
+#include "can_bridge.h"
 #include "ina226.h"
 #include "mpu6050.h"
 #include "thermal.h"
@@ -198,7 +199,7 @@ void sensor_pipeline_read(telem_frame_t *out, uint64_t now_us, uint16_t seq) {
     out->x_mm      = x;
     out->a_deg     = a;
     out->T_N       = 15.0f;
-    out->rpm       = 5.0f;
+    out->rpm       = can_bridge_get_rpm();   /* Faz 19D: ESC actual RPM via CAN */
 
     out->vib_x     = snap.accel_g[0];
     out->vib_y     = snap.accel_g[1];
@@ -226,6 +227,7 @@ void sensor_pipeline_read(telem_frame_t *out, uint64_t now_us, uint16_t seq) {
                        +  out->vib_z * out->vib_z);
     if (vib_rms <= 2.0f) flags |= TELEM_FLAG_VIBRATION_OK;
 
+    flags |= can_bridge_get_flags();   /* Faz 19D: ESC fault flag (bit 15) */
     out->flags = flags;
 }
 

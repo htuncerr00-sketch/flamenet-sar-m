@@ -1,0 +1,23 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "telemetry_task.c"
+        "telemetry_protocol.c"
+        "sensor_pipeline.c"
+        "uart_stream.c"
+        "i2c_bus.c"
+        "ina226.c"
+        "mpu6050.c"
+        "thermal.c"
+        "health_monitor.c"
+        "safety_monitor.c"
+        "can_bridge.c"
+    INCLUDE_DIRS
+        "."
+        "../include"
+    REQUIRES
+        driver
+        esp_timer
+        esp_adc
+        log
+)

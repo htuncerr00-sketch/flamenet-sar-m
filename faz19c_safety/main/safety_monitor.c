@@ -19,6 +19,7 @@
  * (single-word, aligned → atomic on ARMv7-M / ARMv8-M).
  */
 #include "safety_monitor.h"
+#include "sensor_pipeline.h"
 
 #include <string.h>
 #include <stdint.h>
