@@ -6,11 +6,13 @@ Inline validation feedback (red border on invalid fields).
 """
 from __future__ import annotations
 from typing import Optional, List
+from pathlib import Path
 from PySide6.QtCore import Qt, Slot, Signal
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox, QPushButton,
     QGroupBox, QPlainTextEdit, QListWidget, QListWidgetItem, QSplitter,
-    QMessageBox, QFrame, QGridLayout)
+    QMessageBox, QFrame, QGridLayout, QDialog, QFileDialog, QSizePolicy)
+from PySide6.QtGui import QFont
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
@@ -172,13 +174,19 @@ class RecipeEditor(QWidget):
         self._validation_lbl.setWordWrap(True)
         right_layout.addWidget(self._validation_lbl)
 
-        # Save row
+        # Action row
         save_row = QHBoxLayout()
         save_row.addStretch()
         validate_btn = QPushButton("Validate")
         validate_btn.clicked.connect(self._on_validate)
         save_row.addWidget(validate_btn)
-        self._save_btn = QPushButton("Save")
+
+        gcode_btn = QPushButton("Generate G-code…")
+        gcode_btn.setToolTip("Generate helical winding G-code from current parameters")
+        gcode_btn.clicked.connect(self._on_generate_gcode)
+        save_row.addWidget(gcode_btn)
+
+        self._save_btn = QPushButton("Save Recipe")
         self._save_btn.setProperty("role", "primary")
         self._save_btn.clicked.connect(self._on_save)
         save_row.addWidget(self._save_btn)
@@ -260,6 +268,32 @@ class RecipeEditor(QWidget):
         else:
             QMessageBox.critical(self, "Save failed", "Save to DB failed.")
 
+    def _on_generate_gcode(self):
+        r = self._current_recipe()
+        errs = r.validate()
+        if errs:
+            QMessageBox.warning(self, "Invalid parameters",
+                "Fix these errors before generating G-code:\n\n" + "\n".join(errs))
+            return
+        try:
+            from backend.core.winding_planner import WindingParams, generate_helical
+            params = WindingParams(
+                mandrel_R_mm=50.0,
+                mandrel_L_mm=300.0,
+                alpha_deg=r.alpha_deg,
+                n_layers=r.n_layers,
+                tow_width_mm=10.0,
+                fiber_tension_N=r.tension_N,
+                feed_mm_s=r.feed_mm_s,
+            )
+            prog = generate_helical(params)
+        except Exception as e:
+            QMessageBox.critical(self, "G-code generation failed", str(e))
+            return
+
+        dlg = _GCodeViewDialog(prog, r, self)
+        dlg.exec()
+
     def _on_new(self):
         self._id_edit.clear()
         self._name_edit.clear()
@@ -292,3 +326,70 @@ class RecipeEditor(QWidget):
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, r_meta['recipe_id'])
             self._list.addItem(item)
+
+
+class _GCodeViewDialog(QDialog):
+    """Shows generated G-code with copy/save options."""
+
+    def __init__(self, prog, recipe, parent=None):
+        super().__init__(parent)
+        self._prog = prog
+        rid = getattr(recipe, 'recipe_id', 'winding') or 'winding'
+        self.setWindowTitle(f"G-code — {rid}")
+        self.setMinimumSize(700, 540)
+        self._build(prog, recipe)
+
+    def _build(self, prog, recipe):
+        layout = QVBoxLayout(self)
+
+        # Stats header
+        stats = (
+            f"Recipe: {getattr(recipe, 'recipe_id', '—')}  ·  "
+            f"α={recipe.alpha_deg:.2f}°  ·  "
+            f"Layers: {recipe.n_layers}  ·  "
+            f"Tension: {recipe.tension_N:.1f} N  ·  "
+            f"Circuits: {prog.n_circuits}  ·  "
+            f"Length: {prog.total_length_mm / 1000:.2f} m  ·  "
+            f"Est. time: {prog.estimated_time_s / 60:.1f} min"
+        )
+        stats_lbl = QLabel(stats)
+        stats_lbl.setWordWrap(True)
+        stats_lbl.setStyleSheet("color:#a0a8b0; font:9pt Consolas;")
+        layout.addWidget(stats_lbl)
+
+        # G-code text
+        self._editor = QPlainTextEdit()
+        self._editor.setReadOnly(True)
+        self._editor.setPlainText('\n'.join(prog.lines))
+        self._editor.setFont(QFont("Consolas", 9))
+        self._editor.setStyleSheet(
+            "background:#0d1117; color:#e8eaed; border:1px solid #3a4048;")
+        layout.addWidget(self._editor)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        copy_btn = QPushButton("Copy to Clipboard")
+        copy_btn.clicked.connect(self._copy)
+        save_btn = QPushButton("Save to File…")
+        save_btn.setProperty("role", "primary")
+        save_btn.clicked.connect(self._save)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(copy_btn)
+        btn_row.addWidget(save_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _copy(self):
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(self._editor.toPlainText())
+
+    def _save(self):
+        rid = self.windowTitle().replace("G-code — ", "").replace(" ", "_") or "winding"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save G-code", f"{rid}.nc",
+            "G-code files (*.nc *.gcode *.txt);;All files (*)")
+        if path:
+            Path(path).write_text(self._editor.toPlainText(), encoding='utf-8')
+            QMessageBox.information(self, "Saved", f"G-code saved:\n{path}")

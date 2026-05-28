@@ -468,7 +468,7 @@ class FilamentWindingApp(QMainWindow):
         if geom: self.restoreGeometry(geom)
         ws = settings.value("windowState")
         if ws: self.restoreState(ws)
-        tab = settings.value("currentTab", 0, type=int)
+        tab = settings.value("currentTab", 1, type=int)  # 1 = 3D Visualizer
         if 0 <= tab < self._tabs.count():
             self._tabs.setCurrentIndex(tab)
 
