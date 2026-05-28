@@ -21,28 +21,16 @@ from PySide6.QtWidgets import (
     QFrame, QSizePolicy,
 )
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))))))
-
 from .winding_3d import Winding3DPanel
 from ..themes.dark_industrial import COLOR
 
 
 def _make_backend():
-    """Backend modüllerini içe aktar (path'e bağımlı olmaksızın)."""
-    try:
-        from backend.core.geometry_engine import MandrelProfile
-        from backend.core.path_generator import WindingPathParams, generate_path
-        from backend.core.motion_planner import plan_motion
-        from backend.core.gcode_postprocessor import MachineConfig, generate_gcode
-    except ImportError:
-        import importlib, pathlib
-        base = pathlib.Path(__file__).parents[5] / "faz17_d1" / "faz17_d1_backend"
-        sys.path.insert(0, str(base))
-        from faz17_d1.core.geometry_engine import MandrelProfile
-        from faz17_d1.core.path_generator import WindingPathParams, generate_path
-        from faz17_d1.core.motion_planner import plan_motion
-        from faz17_d1.core.gcode_postprocessor import MachineConfig, generate_gcode
+    """Backend CAM modüllerini içe aktar."""
+    from backend.core.geometry_engine import MandrelProfile
+    from backend.core.path_generator import WindingPathParams, generate_path
+    from backend.core.motion_planner import plan_motion
+    from backend.core.gcode_postprocessor import MachineConfig, generate_gcode
     return MandrelProfile, WindingPathParams, generate_path, plan_motion, MachineConfig, generate_gcode
 
 

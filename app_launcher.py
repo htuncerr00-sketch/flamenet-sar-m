@@ -50,27 +50,20 @@ def _crash_hook(exc_type, exc_value, exc_tb):
 sys.excepthook = _crash_hook
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1 · Backend package aliasing
+# 1 · Backend package setup (proper package — no sys.modules aliasing)
 # ─────────────────────────────────────────────────────────────────────────────
-sys.path.insert(0, str(REPO_ROOT / 'faz17_d1' / 'faz17_d1_backend'))
+# Add repo root so `backend/` package is directly importable.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+# Also add faz17_d1_backend so faz17_d1.* resolves inside the backend package.
+_BACKEND_SRC = REPO_ROOT / 'faz17_d1' / 'faz17_d1_backend'
+if str(_BACKEND_SRC) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_SRC))
 try:
-    import faz17_d1, faz17_d1.hardware, faz17_d1.core, faz17_d1.ai, faz17_d1.persistence
-    sys.modules.update({
-        'backend':             faz17_d1,
-        'backend.hardware':    faz17_d1.hardware,
-        'backend.core':        faz17_d1.core,
-        'backend.ai':          faz17_d1.ai,
-        'backend.persistence': faz17_d1.persistence,
-    })
-    importlib.import_module('backend.hardware.esp32_link')
-    importlib.import_module('backend.hardware.telemetry_stream')
-    _rl = REPO_ROOT / 'faz18_bringup' / 'real_esp32_link.py'
-    _s  = importlib.util.spec_from_file_location('backend.hardware.real_esp32_link', str(_rl))
-    _m  = importlib.util.module_from_spec(_s); _m.__package__ = 'backend.hardware'
-    sys.modules['backend.hardware.real_esp32_link'] = _m; _s.loader.exec_module(_m)
-    log.info("Backend aliasing OK")
+    import backend  # triggers backend/__init__.py path setup
+    log.info("Backend package OK")
 except Exception as e:
-    log.critical("Backend aliasing failed: %s", e)
+    log.critical("Backend package import failed: %s", e)
 
 _APP_ROOT = REPO_ROOT / 'faz17_d2' / 'faz17_d2_app' / 'faz17_d2'
 sys.path.insert(0, str(_APP_ROOT))

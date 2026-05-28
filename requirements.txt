@@ -1,0 +1,16 @@
+# Filament Winding CAM Platform — Python Dependencies
+# =====================================================
+# Install: pip install -r requirements.txt
+# Or:      create_venv.bat  (creates isolated venv automatically)
+
+# ── Core UI (required) ─────────────────────────────────────────────────────
+PySide6>=6.5.0
+pyqtgraph>=0.13.3
+numpy>=1.24.0
+
+# ── 3D Visualization (required for Winding 3D panel) ──────────────────────
+PyOpenGL>=3.1.7
+PyOpenGL-accelerate>=3.1.7
+
+# ── Hardware Communication (required for real ESP32 mode) ─────────────────
+pyserial>=3.5
