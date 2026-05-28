@@ -659,14 +659,14 @@ class HomeScreen(QDialog):
         self.hide()
         try:
             from app.main_window import FilamentWindingApp
-            from app.link_factory import LinkConfig, make_link
+            from app.link_factory import LinkConfig
             os.environ.setdefault('FW_LINK_KIND', 'mock')
-            link = make_link(LinkConfig.from_env())
-            self._main_window = FilamentWindingApp(link=link)
+            cfg = LinkConfig.from_env()
+            self._main_window = FilamentWindingApp(link_config=cfg)
             self._main_window._tabs.setCurrentIndex(tab)
             self._main_window.show()
             self._main_window.destroyed.connect(QApplication.quit)
-            log.info("Main app launched (tab=%d, link=%s)", tab, type(link).__name__)
+            log.info("Main app launched (tab=%d, kind=%s)", tab, cfg.kind)
         except Exception as e:
             log.exception("Failed to launch main app")
             self.show()
