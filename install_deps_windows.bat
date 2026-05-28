@@ -6,9 +6,9 @@ REM Requires Python 3.11+ already installed and on PATH.
 
 setlocal EnableDelayedExpansion
 
-REM ── Locate Python ──────────────────────────────────────────────────────────
+REM ── Locate Python (py launcher has priority on Windows) ────────────────────
 set "PYTHON="
-for %%P in (python3.exe python.exe) do (
+for %%P in (py.exe python3.exe python.exe) do (
     if "!PYTHON!"=="" (
         where %%P >nul 2>nul
         if !ERRORLEVEL! == 0 set "PYTHON=%%P"

@@ -2,25 +2,35 @@
 title Filament Winding CAM
 cd /d "%~dp0"
 
-REM ── Find Python ──────────────────────────────────────────────────────────────
+REM ── Find Python (tries py launcher first, then python3, then python) ──────────
 set "PY="
-for %%P in (python3.exe python.exe) do (
+for %%P in (py.exe python3.exe python.exe) do (
     if not defined PY (
         where %%P >nul 2>nul && set "PY=%%P"
     )
 )
+
+REM py.exe launcher: make sure it points to a real Python, not just the store stub
+if defined PY (
+    %PY% --version >nul 2>nul || set "PY="
+)
+
 if not defined PY (
     echo.
     echo  Filament Winding CAM could not start.
     echo.
-    echo  Python was not found on this computer.
+    echo  Python is installed but not reachable from the command line.
     echo.
-    echo  To fix this:
-    echo    1. Go to https://www.python.org/downloads/
-    echo    2. Download Python 3.12 (Windows installer, 64-bit)
-    echo    3. Run the installer - CHECK "Add Python to PATH"
-    echo    4. Then run install_deps_windows.bat
-    echo    5. Then double-click this file again
+    echo  Kolay cozum:
+    echo    1. Baslat menu -^> "Python" ara -^> "Python 3.14" uygulamasini ac
+    echo    2. Acildiktan sonra bu pencereyi kapat
+    echo    3. START_FILAMENT_CAM.bat dosyasina tekrar cift tikla
+    echo.
+    echo  Alternatif cozum - PATH'e ekle:
+    echo    1. Baslat -^> "Ortam degiskenleri duzenle" ara
+    echo    2. Kullanici PATH degiskenini sec, Duzenle
+    echo    3. Yeni ekle: C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python314\
+    echo    4. Tamam -^> Tamam -^> bu bat dosyasini tekrar cift tikla
     echo.
     pause
     exit /b 1
