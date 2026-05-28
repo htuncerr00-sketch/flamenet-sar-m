@@ -230,13 +230,13 @@ class SplashScreen(QDialog):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(540, 300)
+        self._n_done = 0
+        self._n_total = 7
         self._build()
         self._center()
         self._checker = DependencyChecker(self)
         self._checker.check_progress.connect(self._on_check)
         self._checker.all_done.connect(self._on_done)
-        self._n_done = 0
-        self._n_total = 7
 
     def _build(self):
         outer = QVBoxLayout(self)
