@@ -602,7 +602,7 @@ class HomeScreen(QDialog):
         self._btns[0].clicked.connect(self._on_simulation)
         self._btns[1].clicked.connect(self._on_hardware)
         self._btns[2].clicked.connect(self._on_gcode_gen)
-        self._btns[3].clicked.connect(lambda: self._launch(tab=1))
+        self._btns[3].clicked.connect(lambda: self._launch(tab=2))
         self._btns[4].clicked.connect(self._on_settings)
 
         right.addStretch()
@@ -623,7 +623,7 @@ class HomeScreen(QDialog):
     # ── Handlers ──────────────────────────────────────────────────────────────
     def _on_simulation(self):
         os.environ['FW_LINK_KIND'] = 'mock'
-        self._launch(tab=1)
+        self._launch(tab=0)
 
     def _on_hardware(self):
         dlg = PortPickerDialog(self)
@@ -638,7 +638,7 @@ class HomeScreen(QDialog):
 
     def _on_gcode_gen(self):
         os.environ['FW_LINK_KIND'] = 'mock'
-        self._launch(tab=4)
+        self._launch(tab=0)
 
     def _on_settings(self):
         dlg = SettingsDialog(self)

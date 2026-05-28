@@ -37,6 +37,7 @@ from app.panels.alarms import AlarmsPanel
 from app.panels.recipe_editor import RecipeEditor
 from app.panels.commissioning import CommissioningPanel
 from app.panels.predictive_maintenance import PredictiveMaintenancePanel
+from app.panels.cam_panel import CAMPanel
 from app.link_factory import LinkConfig, make_link
 
 
@@ -114,6 +115,7 @@ class FilamentWindingApp(QMainWindow):
         self.setCentralWidget(self._tabs)
 
         # Panels
+        self._panel_cam = CAMPanel()
         self._panel_live = LiveProductionPanel()
         self._panel_3d = Winding3DPanel()
         self._panel_3d.set_winding_params(WindingParams())
@@ -123,6 +125,7 @@ class FilamentWindingApp(QMainWindow):
         self._panel_commission = CommissioningPanel(self._motion, self._link)
         self._panel_pm = PredictiveMaintenancePanel(self._pm)
 
+        self._tabs.addTab(self._panel_cam, "CAM Üretici")
         self._tabs.addTab(self._panel_live, "Canlı Üretim")
         self._tabs.addTab(self._panel_3d, "3D Görüntüleyici")
         self._tabs.addTab(self._panel_alarms, "Alarmlar & Güvenlik")
@@ -468,7 +471,7 @@ class FilamentWindingApp(QMainWindow):
         if geom: self.restoreGeometry(geom)
         ws = settings.value("windowState")
         if ws: self.restoreState(ws)
-        tab = settings.value("currentTab", 1, type=int)  # 1 = 3D Visualizer
+        tab = settings.value("currentTab", 0, type=int)  # 0 = CAM Üretici
         if 0 <= tab < self._tabs.count():
             self._tabs.setCurrentIndex(tab)
 

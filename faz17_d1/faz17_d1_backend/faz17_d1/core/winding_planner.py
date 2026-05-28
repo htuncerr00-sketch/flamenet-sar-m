@@ -1,13 +1,13 @@
 """
 core/winding_planner.py — Helical Winding Pattern Planner + G-code
 ====================================================================
-Clairaut geodesic: c = R × sin(α)
-G-code generation: G91 X.. A.. F.. coordinated motion.
+Geriye dönük uyumlu arayüz: WindingParams + generate_helical()
+Yeni motor: geometry_engine + path_generator + motion_planner + gcode_postprocessor
 """
 from __future__ import annotations
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,13 +30,13 @@ class WindingParams:
 
     def validate(self) -> List[str]:
         errs = []
-        if not (0 < self.alpha_deg < 90):  errs.append(f"alpha out of (0,90): {self.alpha_deg}")
-        if self.n_layers < 1:               errs.append(f"n_layers < 1")
+        if not (0 < self.alpha_deg < 90):  errs.append(f"alpha aralık dışı (0,90): {self.alpha_deg}")
+        if self.n_layers < 1:               errs.append("n_layers < 1")
         if not (3 <= self.fiber_tension_N <= 38):
-            errs.append(f"tension out of [3,38]N: {self.fiber_tension_N}")
-        if self.feed_mm_s > 200:            errs.append(f"feed > 200 mm/s")
-        if self.mandrel_R_mm <= 0:          errs.append(f"R <= 0")
-        if self.mandrel_L_mm <= 0:          errs.append(f"L <= 0")
+            errs.append(f"gerilim [3,38]N dışında: {self.fiber_tension_N}")
+        if self.feed_mm_s > 200:            errs.append(f"hız > 200 mm/s")
+        if self.mandrel_R_mm <= 0:          errs.append("R <= 0")
+        if self.mandrel_L_mm <= 0:          errs.append("L <= 0")
         return errs
 
 
@@ -44,40 +44,53 @@ class WindingParams:
 class GCodeProgram:
     lines:    List[str] = field(default_factory=list)
     n_circuits: int = 0
+    n_layers: int = 0
     total_length_mm: float = 0.0
     estimated_time_s: float = 0.0
+    coverage_pct: float = 0.0
 
     def __len__(self) -> int: return len(self.lines)
 
+    def as_text(self) -> str:
+        return "\n".join(self.lines)
+
 
 def generate_helical(params: WindingParams) -> GCodeProgram:
-    """Generate G-code for helical winding pattern."""
+    """
+    Geriye dönük uyumlu arayüz — yeni CAM motorunu kullanır.
+    Düz silindirik mandrel için helical yol üretir.
+    """
     errs = params.validate()
     if errs:
-        raise ValueError(f"Invalid params: {errs}")
-    p = params
-    prog = GCodeProgram()
-    prog.lines.append(f"; Faz17 winding program — generated")
-    prog.lines.append(f"; mandrel R={p.mandrel_R_mm}mm L={p.mandrel_L_mm}mm")
-    prog.lines.append(f"; alpha={p.alpha_deg}° layers={p.n_layers}")
-    prog.lines.append(f"; c={p.clairaut_c_mm:.3f}mm (Clairaut)")
-    prog.lines.append(f"G21 G91")          # mm, relative
-    prog.lines.append(f"F{p.feed_mm_min:.0f}")
-    pitch = p.tow_width_mm / math.cos(math.radians(p.alpha_deg))
-    a_per_pass = 360.0 / math.tan(math.radians(p.alpha_deg))   # degrees per L
-    feed_passes = int(p.mandrel_L_mm / pitch) + 1
-    total_len = 0.0
-    for layer in range(p.n_layers):
-        direction = 1 if layer % 2 == 0 else -1
-        prog.lines.append(f"; Layer {layer+1}/{p.n_layers}  dir={direction}")
-        for circ in range(feed_passes):
-            dx = pitch * direction
-            da = p.mandrel_L_mm / feed_passes * a_per_pass * direction
-            prog.lines.append(f"G1 X{dx:.3f} A{da:.3f}")
-            total_len += abs(dx)
-            prog.n_circuits += 1
-    prog.lines.append(f"; total circuits: {prog.n_circuits}")
-    prog.lines.append("M30")
-    prog.total_length_mm = total_len
-    prog.estimated_time_s = total_len / p.feed_mm_s
+        raise ValueError(f"Geçersiz parametreler: {errs}")
+
+    from .geometry_engine import MandrelProfile
+    from .path_generator import WindingPathParams, generate_path
+    from .motion_planner import plan_motion
+    from .gcode_postprocessor import MachineConfig, generate_gcode
+
+    profile = MandrelProfile.cylinder(params.mandrel_L_mm, params.mandrel_R_mm)
+    path_params = WindingPathParams(
+        profile=profile,
+        alpha_deg=params.alpha_deg,
+        n_layers=params.n_layers,
+        tow_width_mm=params.tow_width_mm,
+        feed_mm_s=params.feed_mm_s,
+        spindle_rpm=60.0,
+        winding_strategy="helical",
+        carriage_min_mm=-5.0,
+        carriage_max_mm=params.mandrel_L_mm + 5.0,
+    )
+    path = generate_path(path_params)
+    segments = plan_motion(path)
+    gp = generate_gcode(segments, path, MachineConfig())
+
+    prog = GCodeProgram(
+        lines=gp.lines,
+        n_circuits=gp.n_circuits,
+        n_layers=gp.n_layers,
+        total_length_mm=gp.total_length_mm,
+        estimated_time_s=gp.estimated_time_s,
+        coverage_pct=gp.coverage_pct,
+    )
     return prog
