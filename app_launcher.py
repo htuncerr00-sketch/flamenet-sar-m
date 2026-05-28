@@ -1,526 +1,726 @@
 """
-app_launcher.py — Filament Winding CAM Launcher
-=================================================
-Entry point for end users.  Double-click START_FILAMENT_CAM.bat (or .ps1).
+app_launcher.py — Filament Winding CAM v2
+==========================================
+Production-quality entry point.  Double-click START_FILAMENT_CAM.bat.
 
-Shows a launcher window with a live winding preview and four large buttons:
-  • Simulation Mode   — mock ESP32, no hardware required
-  • Hardware Mode     — pick COM port, connect real firmware
-  • Open Last Project — loads the most recently saved recipe
-  • Generate G-code   — instant sample G-code without starting the full app
-
-Also wires the 'backend' package alias so the PySide6 app imports resolve
-on any machine regardless of symlink state.
+Startup sequence
+----------------
+1. Init logging (logs/YYYYMMDD/startup_HHMMSS.log)
+2. Wire 'backend' package alias (replaces missing symlink)
+3. Show splash screen + run dependency checks in background thread
+4. First-run workspace setup (workspace/ dirs, default recipe)
+5. Show home screen with 5 mode buttons + live winding preview
+6. Launch main FilamentWindingApp on selection
 """
 from __future__ import annotations
-import importlib, importlib.util, math, os, sys
+import importlib, importlib.util, logging, math, os, sys, time, traceback
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import List, Optional, Tuple
 
-# ── 1. Backend aliasing ───────────────────────────────────────────────────────
-REPO_ROOT = Path(__file__).resolve().parent
+# ─────────────────────────────────────────────────────────────────────────────
+# 0 · Logging (happens BEFORE PySide6 so crash logs capture everything)
+# ─────────────────────────────────────────────────────────────────────────────
+REPO_ROOT  = Path(__file__).resolve().parent
+_LOG_ROOT  = REPO_ROOT / 'logs' / datetime.now().strftime('%Y%m%d')
+_LOG_ROOT.mkdir(parents=True, exist_ok=True)
+_LOG_FILE  = _LOG_ROOT / f"startup_{datetime.now().strftime('%H%M%S')}.log"
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)-8s %(name)s: %(message)s',
+    handlers=[
+        logging.FileHandler(_LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler(sys.stderr),
+    ])
+log = logging.getLogger('launcher')
+log.info("=== Filament Winding CAM startup ===")
+log.info("Log: %s", _LOG_FILE)
+log.info("Python %s on %s", sys.version.split()[0], sys.platform)
+
+
+def _crash_hook(exc_type, exc_value, exc_tb):
+    crash_path = _LOG_ROOT / f"crash_{datetime.now().strftime('%H%M%S')}.log"
+    msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    log.critical("UNCAUGHT EXCEPTION\n%s", msg)
+    crash_path.write_text(msg, encoding='utf-8')
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+sys.excepthook = _crash_hook
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1 · Backend package aliasing
+# ─────────────────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(REPO_ROOT / 'faz17_d1' / 'faz17_d1_backend'))
-
-import faz17_d1, faz17_d1.hardware, faz17_d1.core, faz17_d1.ai, faz17_d1.persistence
-
-sys.modules.update({
-    'backend':             faz17_d1,
-    'backend.hardware':    faz17_d1.hardware,
-    'backend.core':        faz17_d1.core,
-    'backend.ai':          faz17_d1.ai,
-    'backend.persistence': faz17_d1.persistence,
-})
-
-importlib.import_module('backend.hardware.esp32_link')
-importlib.import_module('backend.hardware.telemetry_stream')
-
-_rl = REPO_ROOT / 'faz18_bringup' / 'real_esp32_link.py'
-_s  = importlib.util.spec_from_file_location('backend.hardware.real_esp32_link', str(_rl))
-_m  = importlib.util.module_from_spec(_s); _m.__package__ = 'backend.hardware'
-sys.modules['backend.hardware.real_esp32_link'] = _m; _s.loader.exec_module(_m)
+try:
+    import faz17_d1, faz17_d1.hardware, faz17_d1.core, faz17_d1.ai, faz17_d1.persistence
+    sys.modules.update({
+        'backend':             faz17_d1,
+        'backend.hardware':    faz17_d1.hardware,
+        'backend.core':        faz17_d1.core,
+        'backend.ai':          faz17_d1.ai,
+        'backend.persistence': faz17_d1.persistence,
+    })
+    importlib.import_module('backend.hardware.esp32_link')
+    importlib.import_module('backend.hardware.telemetry_stream')
+    _rl = REPO_ROOT / 'faz18_bringup' / 'real_esp32_link.py'
+    _s  = importlib.util.spec_from_file_location('backend.hardware.real_esp32_link', str(_rl))
+    _m  = importlib.util.module_from_spec(_s); _m.__package__ = 'backend.hardware'
+    sys.modules['backend.hardware.real_esp32_link'] = _m; _s.loader.exec_module(_m)
+    log.info("Backend aliasing OK")
+except Exception as e:
+    log.critical("Backend aliasing failed: %s", e)
 
 _APP_ROOT = REPO_ROOT / 'faz17_d2' / 'faz17_d2_app' / 'faz17_d2'
 sys.path.insert(0, str(_APP_ROOT))
 
-# ── 2. PySide6 ────────────────────────────────────────────────────────────────
-from PySide6.QtCore    import Qt, QTimer, QSize, QPoint
+# ─────────────────────────────────────────────────────────────────────────────
+# 2 · PySide6 imports
+# ─────────────────────────────────────────────────────────────────────────────
+from PySide6.QtCore    import Qt, QThread, Signal, QTimer, QSettings, QSize
 from PySide6.QtGui     import (QPainter, QColor, QPen, QBrush, QLinearGradient,
-                                QFont, QFontMetrics, QIcon, QClipboard)
-from PySide6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout,
-                                QGridLayout, QPushButton, QLabel, QWidget,
-                                QFrame, QTextEdit, QFileDialog, QMessageBox,
-                                QComboBox, QDialogButtonBox, QSizePolicy,
-                                QPlainTextEdit, QProgressBar)
+                                QFont, QPalette)
+from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QVBoxLayout,
+                                QHBoxLayout, QLabel, QPushButton, QFrame,
+                                QProgressBar, QFileDialog, QMessageBox,
+                                QComboBox, QDialogButtonBox, QPlainTextEdit,
+                                QSizePolicy, QLineEdit, QCheckBox, QGroupBox,
+                                QFormLayout, QScrollArea)
 import PySide6
 
-_DB_PATH = str(REPO_ROOT / 'recipes.db')
+# ─────────────────────────────────────────────────────────────────────────────
+# 3 · Constants
+# ─────────────────────────────────────────────────────────────────────────────
+APP_NAME    = "Filament Winding CAM"
+APP_VERSION = "1.0"
+WORKSPACE   = REPO_ROOT / 'workspace'
+SETTINGS_ORG = "FilamentWinding"
+SETTINGS_APP = "CAM"
 
+C = {
+    'bg':       '#1e2228', 'bg_dark':  '#0d1117', 'bg_panel': '#252a32',
+    'text':     '#e8eaed', 'dim':      '#a0a8b0',  'muted':   '#5a6068',
+    'accent':   '#5dade2', 'ok':       '#5cb85c',  'warn':    '#f0ad4e',
+    'crit':     '#d9534f', 'border':   '#3a4048',
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Winding preview widget
+# 4 · Workspace management
+# ─────────────────────────────────────────────────────────────────────────────
+class WorkspaceManager:
+    DIRS = ['gcode', 'projects', 'logs', 'exports']
+    FIRST_RUN_FLAG = WORKSPACE / '.initialized'
+
+    @classmethod
+    def setup(cls) -> bool:
+        """Create workspace structure. Returns True if first run."""
+        first_run = not cls.FIRST_RUN_FLAG.exists()
+        WORKSPACE.mkdir(parents=True, exist_ok=True)
+        for d in cls.DIRS:
+            (WORKSPACE / d).mkdir(exist_ok=True)
+        if first_run:
+            cls._create_default_project()
+            cls.FIRST_RUN_FLAG.touch()
+            log.info("First-run workspace initialised at %s", WORKSPACE)
+        return first_run
+
+    @classmethod
+    def _create_default_project(cls):
+        gcode_dir = WORKSPACE / 'gcode'
+        try:
+            from backend.core.winding_planner import WindingParams, generate_helical
+            prog = generate_helical(WindingParams(
+                mandrel_R_mm=75, mandrel_L_mm=300, alpha_deg=55,
+                n_layers=4, tow_width_mm=6, fiber_tension_N=15, feed_mm_s=80))
+            (gcode_dir / 'sample_55deg_4layer.nc').write_text(
+                '\n'.join(prog.lines), encoding='utf-8')
+            log.info("Default G-code sample written")
+        except Exception as e:
+            log.warning("Could not generate default sample: %s", e)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5 · Dependency checks (run in background thread during splash)
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class CheckResult:
+    name: str
+    ok: bool
+    message: str
+    optional: bool = False
+
+
+class DependencyChecker(QThread):
+    check_progress = Signal(str, bool, str, bool)   # name, ok, msg, optional
+    all_done       = Signal(bool, list)              # overall_ok, results
+
+    def run(self):
+        checks = [
+            ('Python 3.11+',      self._py_version,  False),
+            ('PySide6 (Qt6)',     self._pyside6,     False),
+            ('pyqtgraph',         self._pyqtgraph,   False),
+            ('NumPy',             self._numpy,       False),
+            ('Backend modules',   self._backend,     False),
+            ('OpenGL (3D view)',  self._opengl,      True),
+            ('pyserial (ESP32)',  self._pyserial,    True),
+        ]
+        results, all_ok = [], True
+        for name, fn, optional in checks:
+            ok, msg = fn()
+            log.info("  %-22s %s  %s", name, 'OK' if ok else 'FAIL', msg)
+            self.check_progress.emit(name, ok, msg, optional)
+            r = CheckResult(name, ok, msg, optional)
+            results.append(r)
+            if not ok and not optional:
+                all_ok = False
+            self.msleep(120)
+        self.all_done.emit(all_ok, results)
+
+    def _py_version(self):
+        v = sys.version_info
+        ok = (v.major, v.minor) >= (3, 11)
+        return ok, f"{v.major}.{v.minor}.{v.micro}"
+
+    def _pyside6(self):
+        return True, PySide6.__version__
+
+    def _pyqtgraph(self):
+        try:
+            import pyqtgraph as pg
+            return True, pg.__version__
+        except ImportError:
+            return False, "pip install pyqtgraph"
+
+    def _numpy(self):
+        try:
+            import numpy as np
+            return True, np.__version__
+        except ImportError:
+            return False, "pip install numpy"
+
+    def _backend(self):
+        try:
+            from backend.core.winding_planner import WindingParams
+            from backend.hardware.esp32_link  import MockESP32Link
+            return True, "faz17_d1 resolved"
+        except Exception as e:
+            return False, str(e)[:60]
+
+    def _opengl(self):
+        try:
+            import OpenGL
+            return True, OpenGL.__version__
+        except ImportError:
+            return True, "not installed (3D uses software fallback)"
+
+    def _pyserial(self):
+        try:
+            import serial
+            return True, serial.__version__
+        except ImportError:
+            return True, "not installed (simulation mode only)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6 · Splash screen
+# ─────────────────────────────────────────────────────────────────────────────
+class SplashScreen(QDialog):
+    ready = Signal(bool, list)   # forwarded from checker
+
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(540, 300)
+        self._build()
+        self._center()
+        self._checker = DependencyChecker(self)
+        self._checker.check_progress.connect(self._on_check)
+        self._checker.all_done.connect(self._on_done)
+        self._n_done = 0
+        self._n_total = 7
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        frame = QFrame()
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background:{C['bg_dark']};
+                border:1px solid {C['border']};
+                border-radius:12px;
+            }}
+        """)
+        outer.addWidget(frame)
+
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(40, 36, 40, 28)
+        lay.setSpacing(10)
+
+        title = QLabel(APP_NAME)
+        title.setStyleSheet(f"color:{C['accent']}; font:bold 22pt 'Segoe UI';")
+        title.setAlignment(Qt.AlignCenter)
+        lay.addWidget(title)
+
+        sub = QLabel("Advanced Composite Manufacturing Platform")
+        sub.setStyleSheet(f"color:{C['dim']}; font:10pt 'Segoe UI';")
+        sub.setAlignment(Qt.AlignCenter)
+        lay.addWidget(sub)
+
+        lay.addSpacing(16)
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, self._n_total)
+        self._progress.setValue(0)
+        self._progress.setTextVisible(False)
+        self._progress.setFixedHeight(6)
+        self._progress.setStyleSheet(f"""
+            QProgressBar {{
+                background:{C['border']}; border-radius:3px; border:none;
+            }}
+            QProgressBar::chunk {{
+                background:{C['accent']}; border-radius:3px;
+            }}
+        """)
+        lay.addWidget(self._progress)
+
+        self._status = QLabel("Initialising…")
+        self._status.setStyleSheet(f"color:{C['dim']}; font:9pt Consolas;")
+        self._status.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._status)
+
+        lay.addStretch()
+
+        ver = QLabel(f"v{APP_VERSION}")
+        ver.setStyleSheet(f"color:{C['muted']}; font:8pt 'Segoe UI';")
+        ver.setAlignment(Qt.AlignRight)
+        lay.addWidget(ver)
+
+    def _center(self):
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.move(screen.center() - self.rect().center())
+
+    def start_checks(self):
+        self._checker.start()
+
+    def _on_check(self, name, ok, msg, optional):
+        self._n_done += 1
+        self._progress.setValue(self._n_done)
+        icon = '✓' if ok else ('!' if optional else '✗')
+        self._status.setText(f"{icon} {name}  {msg}")
+        color = C['ok'] if ok else (C['warn'] if optional else C['crit'])
+        self._status.setStyleSheet(f"color:{color}; font:9pt Consolas;")
+
+    def _on_done(self, all_ok, results):
+        if all_ok:
+            self._status.setText("✓  Ready to launch")
+            self._status.setStyleSheet(f"color:{C['ok']}; font:bold 9pt Consolas;")
+        else:
+            self._status.setText("✗  Missing required packages — see TROUBLESHOOTING.md")
+            self._status.setStyleSheet(f"color:{C['crit']}; font:bold 9pt Consolas;")
+        QTimer.singleShot(600, lambda: self.ready.emit(all_ok, results))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7 · Winding preview widget
 # ─────────────────────────────────────────────────────────────────────────────
 class WindingPreviewWidget(QWidget):
-    """Animated 2-D helical-path preview — draws with QPainter, no OpenGL."""
-
     LAYERS = [
-        (QColor(93, 173, 226),  55.0,  1, 8),   # blue,   55°, fwd, 8 circuits
-        (QColor(255, 165,  50), 55.0, -1, 8),   # orange, 55°, rev
-        (QColor( 80, 200, 120), 20.0,  1, 5),   # green,  20° hoop
+        (QColor(93, 173, 226),  1,  8),
+        (QColor(255, 165,  50), -1, 8),
+        (QColor( 80, 200, 120),  1, 4),
     ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._phase = 0.0
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(33)
-        self.setMinimumSize(380, 240)
+        t = QTimer(self); t.timeout.connect(self._tick); t.start(33)
+        self.setMinimumSize(300, 200)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     def _tick(self):
-        self._phase += 0.018
-        self.update()
+        self._phase += 0.018; self.update()
 
-    def paintEvent(self, event):  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+    def paintEvent(self, ev):  # noqa: N802
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
         W, H = self.width(), self.height()
-
-        # Background
-        p.fillRect(0, 0, W, H, QColor(15, 20, 25))
-
+        p.fillRect(0, 0, W, H, QColor(12, 16, 21))
         cx, cy = W // 2, H // 2
-        mw = int(W * 0.72)
-        mh = int(H * 0.40)
-        ea = max(int(mh * 0.25), 6)
-        x0 = cx - mw // 2
-        x1 = cx + mw // 2
+        mw, mh = int(W * 0.74), int(H * 0.40)
+        ea = max(int(mh * 0.25), 5)
+        x0, x1 = cx - mw // 2, cx + mw // 2
 
-        # Mandrel body
-        grad = QLinearGradient(cx, cy - mh // 2, cx, cy + mh // 2)
-        grad.setColorAt(0.00, QColor(90, 95, 100))
-        grad.setColorAt(0.30, QColor(115, 120, 125))
-        grad.setColorAt(0.65, QColor(70, 75, 80))
-        grad.setColorAt(1.00, QColor(45, 50, 55))
-        p.setBrush(QBrush(grad))
-        p.setPen(Qt.NoPen)
+        g = QLinearGradient(cx, cy - mh // 2, cx, cy + mh // 2)
+        g.setColorAt(0.0, QColor(88, 93, 98)); g.setColorAt(0.3, QColor(112, 117, 122))
+        g.setColorAt(0.65, QColor(68, 73, 78)); g.setColorAt(1.0, QColor(42, 47, 52))
+        p.setBrush(QBrush(g)); p.setPen(Qt.NoPen)
         p.drawRect(x0, cy - mh // 2, mw, mh)
 
-        # Fiber paths
-        for color, alpha_deg, direction, n_circ in self.LAYERS:
-            self._draw_layer(p, x0, x1, cx, cy, mh, color, alpha_deg,
-                             direction, n_circ)
+        for color, direction, n_circ in self.LAYERS:
+            R_s = mh / 2.0 * 0.66; prev = None; prev_c = None
+            ph = direction * self._phase
+            for i in range(181):
+                t = i / 180; sx = x0 + t * (x1 - x0)
+                theta = direction * n_circ * 2 * math.pi * t + ph
+                sy = cy + math.sin(theta) * R_s; fc = math.cos(theta)
+                fade = min(t * 10, (1 - t) * 10, 1.0)
+                a = int(255 * fade * (0.18 + 0.82 * max(0.0, fc)))
+                qc = QColor(color); qc.setAlpha(a)
+                p.setPen(QPen(qc, 1.4))
+                pt_now = (int(sx), int(sy))
+                if prev and abs(sy - prev[1]) < R_s * 1.5 and not (prev_c and prev_c > 0.1 and fc < -0.1):
+                    p.drawLine(prev[0], prev[1], pt_now[0], pt_now[1])
+                prev = pt_now; prev_c = fc
 
-        # Left end cap
-        p.setBrush(QBrush(QColor(50, 55, 60)))
-        p.setPen(QPen(QColor(40, 45, 50), 1))
+        p.setBrush(QBrush(QColor(48, 53, 58))); p.setPen(QPen(QColor(38, 43, 48), 1))
         p.drawEllipse(x0 - ea, cy - mh // 2, ea * 2, mh)
-
-        # Right end cap
-        grad2 = QLinearGradient(x1 - ea, cy, x1 + ea, cy)
-        grad2.setColorAt(0.0, QColor(85, 90, 95))
-        grad2.setColorAt(1.0, QColor(50, 55, 60))
-        p.setBrush(QBrush(grad2))
-        p.setPen(QPen(QColor(65, 70, 75), 1))
+        g2 = QLinearGradient(x1 - ea, cy, x1 + ea, cy)
+        g2.setColorAt(0, QColor(83, 88, 93)); g2.setColorAt(1, QColor(48, 53, 58))
+        p.setBrush(QBrush(g2)); p.setPen(QPen(QColor(63, 68, 73), 1))
         p.drawEllipse(x1 - ea, cy - mh // 2, ea * 2, mh)
-
-        # Axis label
-        p.setPen(QColor(70, 80, 90))
-        p.setFont(QFont("Consolas", 8))
-        p.drawText(8, H - 8, "α=55°  3-layer helical  R=75 mm  L=300 mm")
-
-    def _draw_layer(self, p, x0, x1, cx, cy, mh,
-                    color, alpha_deg, direction, n_circ):
-        R_s  = mh / 2.0 * 0.68
-        N    = 180
-        ph   = direction * self._phase
-        prev_pt  = None
-        prev_cos = None
-
-        for i in range(N + 1):
-            t     = i / N
-            sx    = x0 + t * (x1 - x0)
-            theta = direction * n_circ * 2 * math.pi * t + ph
-            fy    = math.sin(theta)
-            fc    = math.cos(theta)
-            sy    = cy + fy * R_s
-
-            fade  = min(t * 10, (1 - t) * 10, 1.0)
-            depth = 0.18 + 0.82 * max(0.0, fc)
-            alpha = int(255 * fade * depth)
-
-            qc = QColor(color)
-            qc.setAlpha(alpha)
-            pen = QPen(qc, 1.4)
-            p.setPen(pen)
-
-            pt = QPoint(int(sx), int(sy))
-            if (prev_pt is not None and
-                    abs(sy - prev_pt.y()) < R_s * 1.5 and
-                    # don't draw line that crosses "behind" the cylinder edge
-                    not (prev_cos is not None and
-                         prev_cos > 0.1 and fc < -0.1)):
-                p.drawLine(prev_pt, pt)
-            prev_pt  = pt
-            prev_cos = fc
-
+        p.setPen(QColor(60, 70, 80)); p.setFont(QFont("Consolas", 8))
+        p.drawText(8, H - 8, "α=55°  3-layer  R=75mm  L=300mm")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# G-code dialog
-# ─────────────────────────────────────────────────────────────────────────────
-class GCodeDialog(QDialog):
-    def __init__(self, gcode_text: str, stats: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Generated G-code")
-        self.setMinimumSize(680, 520)
-        self._text = gcode_text
-        self._build(gcode_text, stats)
-
-    def _build(self, gcode_text, stats):
-        layout = QVBoxLayout(self)
-
-        stats_lbl = QLabel(stats)
-        stats_lbl.setStyleSheet("color:#a0a8b0; font:10pt Consolas;")
-        layout.addWidget(stats_lbl)
-
-        editor = QPlainTextEdit()
-        editor.setReadOnly(True)
-        editor.setPlainText(gcode_text)
-        editor.setFont(QFont("Consolas", 9))
-        editor.setStyleSheet(
-            "background:#0d1117; color:#e8eaed; border:1px solid #3a4048;")
-        layout.addWidget(editor)
-
-        btn_row = QHBoxLayout()
-        copy_btn = QPushButton("Copy to Clipboard")
-        copy_btn.clicked.connect(
-            lambda: QApplication.clipboard().setText(self._text))
-        save_btn = QPushButton("Save to File…")
-        save_btn.setProperty("role", "primary")
-        save_btn.clicked.connect(self._save)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(copy_btn)
-        btn_row.addWidget(save_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
-
-    def _save(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save G-code", "winding_program.nc",
-            "G-code files (*.nc *.gcode *.txt);;All files (*)")
-        if path:
-            Path(path).write_text(self._text, encoding='utf-8')
-            QMessageBox.information(self, "Saved", f"G-code saved to:\n{path}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Port picker (hardware mode)
+# 8 · Dialogs (port picker, G-code viewer, settings)
 # ─────────────────────────────────────────────────────────────────────────────
 class PortPickerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Connect to Hardware")
-        self.setFixedSize(380, 180)
-        self.port = None
+        self.setWindowTitle("Connect to ESP32")
+        self.setFixedSize(380, 190)
+        self.port = None; self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Select COM port:"))
+        self._combo = QComboBox(); self._refresh()
+        lay.addWidget(self._combo)
+        r = QPushButton("Refresh"); r.clicked.connect(self._refresh)
+        lay.addWidget(r)
+        note = QLabel("Baud: 921600 (fixed)  ·  Driver: CP210x or CH340")
+        note.setStyleSheet(f"color:{C['dim']}; font-size:9pt;")
+        lay.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok); bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _refresh(self):
+        self._combo.clear()
+        try:
+            import serial.tools.list_ports
+            ports = [p.device for p in serial.tools.list_ports.comports()]
+        except ImportError:
+            import glob
+            ports = glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*') + [f'COM{i}' for i in range(1, 17)]
+        for p in (ports or ['COM3', '/dev/ttyUSB0']):
+            self._combo.addItem(p)
+
+    def _ok(self):
+        self.port = self._combo.currentText(); self.accept()
+
+
+class GCodeDialog(QDialog):
+    def __init__(self, prog, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Sample G-code Preview"); self.setMinimumSize(660, 500)
+        self._text = '\n'.join(prog.lines); lay = QVBoxLayout(self)
+        stats = (f"Circuits: {prog.n_circuits}  ·  "
+                 f"Length: {prog.total_length_mm/1000:.2f} m  ·  "
+                 f"Est. time: {prog.estimated_time_s/60:.1f} min")
+        lbl = QLabel(stats); lbl.setStyleSheet(f"color:{C['dim']}; font:9pt Consolas;")
+        lay.addWidget(lbl)
+        ed = QPlainTextEdit(); ed.setReadOnly(True); ed.setPlainText(self._text)
+        ed.setFont(QFont("Consolas", 9))
+        ed.setStyleSheet(f"background:{C['bg_dark']}; color:{C['text']}; border:1px solid {C['border']};")
+        lay.addWidget(ed)
+        row = QHBoxLayout()
+        cb = QPushButton("Copy"); cb.clicked.connect(lambda: QApplication.clipboard().setText(self._text))
+        sb = QPushButton("Save…"); sb.clicked.connect(self._save)
+        cl = QPushButton("Close"); cl.clicked.connect(self.accept)
+        row.addWidget(cb); row.addWidget(sb); row.addStretch(); row.addWidget(cl)
+        lay.addLayout(row)
+
+    def _save(self):
+        p, _ = QFileDialog.getSaveFileName(self, "Save G-code", "winding.nc",
+                                           "G-code (*.nc *.gcode);;All files (*)")
+        if p: Path(p).write_text(self._text, encoding='utf-8')
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings"); self.setFixedSize(460, 340)
+        self._s = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self._build()
 
     def _build(self):
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Select ESP32 COM port:"))
+        lay = QVBoxLayout(self)
 
-        self._combo = QComboBox()
-        self._refresh_ports()
-        layout.addWidget(self._combo)
+        hw = QGroupBox("Hardware")
+        hf = QFormLayout(hw)
+        self._port = QLineEdit(self._s.value("port", "COM3"))
+        hf.addRow("Default port:", self._port)
+        self._autoconn = QCheckBox("Auto-connect on startup")
+        self._autoconn.setChecked(self._s.value("autoconn", False, bool))
+        hf.addRow("", self._autoconn)
+        lay.addWidget(hw)
 
-        refresh_btn = QPushButton("Refresh port list")
-        refresh_btn.clicked.connect(self._refresh_ports)
-        layout.addWidget(refresh_btn)
+        ws_box = QGroupBox("Workspace")
+        wf = QFormLayout(ws_box)
+        self._ws_path = QLineEdit(str(WORKSPACE))
+        self._ws_path.setReadOnly(True)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse_ws)
+        wr = QHBoxLayout(); wr.addWidget(self._ws_path); wr.addWidget(browse)
+        wf.addRow("Path:", wr)
+        lay.addWidget(ws_box)
 
-        note = QLabel(
-            "Baud rate: 921600 (fixed)\n"
-            "USB driver: CP210x or CH340 required")
-        note.setStyleSheet("color:#a0a8b0; font-size:9pt;")
-        layout.addWidget(note)
+        disp = QGroupBox("Display")
+        df = QFormLayout(disp)
+        self._opengl = QCheckBox("Enable OpenGL 3D rendering")
+        self._opengl.setChecked(self._s.value("opengl", True, bool))
+        df.addRow("", self._opengl)
+        lay.addWidget(disp)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self._on_ok)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        lay.addStretch()
+        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._save); bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
 
-    def _refresh_ports(self):
-        self._combo.clear()
-        import glob
-        candidates = (
-            glob.glob('/dev/ttyUSB*') +
-            glob.glob('/dev/ttyACM*') +
-            [f'COM{i}' for i in range(1, 21)]
-        )
-        # On Windows use serial.tools.list_ports if available
-        try:
-            import serial.tools.list_ports
-            candidates = [p.device for p in
-                          serial.tools.list_ports.comports()]
-        except ImportError:
-            pass
-        for c in (candidates or ['/dev/ttyUSB0', 'COM3']):
-            self._combo.addItem(c)
+    def _browse_ws(self):
+        d = QFileDialog.getExistingDirectory(self, "Select Workspace", str(WORKSPACE))
+        if d: self._ws_path.setText(d)
 
-    def _on_ok(self):
-        self.port = self._combo.currentText()
+    def _save(self):
+        self._s.setValue("port", self._port.text())
+        self._s.setValue("autoconn", self._autoconn.isChecked())
+        self._s.setValue("opengl", self._opengl.isChecked())
         self.accept()
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Launcher window
+# 9 · Home screen
 # ─────────────────────────────────────────────────────────────────────────────
-_BTN_STYLE = """
+_BTN = """
 QPushButton {{
-    background-color: {bg};
-    color: {fg};
-    border: 1px solid {border};
-    border-radius: 6px;
-    padding: 14px 20px;
-    font-size: 13pt;
-    font-weight: bold;
-    text-align: left;
+    background:{bg}; color:{fg}; border:1px solid {b};
+    border-radius:6px; padding:0 16px;
+    font-size:11pt; font-weight:bold; text-align:left;
 }}
-QPushButton:hover {{
-    background-color: {hover};
-    border-color: {fg};
-}}
-QPushButton:pressed {{
-    background-color: {bg};
-}}
+QPushButton:hover {{ background:{hv}; border-color:{fg}; }}
+QPushButton:pressed {{ background:{bg}; }}
 """
 
-def _btn_css(bg, fg='#e8eaed', border=None, hover=None):
-    return _BTN_STYLE.format(
-        bg=bg, fg=fg,
-        border=border or bg,
-        hover=hover or bg)
+def _bs(bg, fg='#e8eaed', border=None, hover=None):
+    b = border or bg; hv = hover or bg
+    return _BTN.format(bg=bg, fg=fg, b=b, hv=hv)
 
 
-class LauncherWindow(QDialog):
+class _ModeBtn(QPushButton):
+    def __init__(self, icon, title, sub, style, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(68)
+        self.setStyleSheet(style)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 10, 14, 10)
+        outer.setSpacing(2)
+        top = QHBoxLayout(); top.setSpacing(8)
+        ic = QLabel(icon); ic.setStyleSheet("font-size:16pt; background:transparent; border:none;")
+        tl = QLabel(title); tl.setStyleSheet(f"font:bold 11pt 'Segoe UI'; color:#e8eaed; background:transparent; border:none;")
+        top.addWidget(ic); top.addWidget(tl); top.addStretch()
+        sl = QLabel(sub); sl.setStyleSheet(f"font:8pt 'Segoe UI'; color:{C['dim']}; background:transparent; border:none;")
+        outer.addLayout(top); outer.addWidget(sl)
+
+
+class HomeScreen(QDialog):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Filament Winding CAM")
-        self.setMinimumSize(960, 560)
-        self.setStyleSheet("background-color:#1e2228; color:#e8eaed;")
+        self.setWindowTitle(f"{APP_NAME}  –  v{APP_VERSION}")
+        self.setMinimumSize(980, 580)
+        self.setStyleSheet(f"background:{C['bg']}; color:{C['text']};")
         self._main_window = None
         self._build()
 
-    # ── Layout ────────────────────────────────────────────────────────────────
     def _build(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
 
-        # Header bar
-        header = QFrame()
-        header.setFixedHeight(60)
-        header.setStyleSheet("background:#151a20; border-bottom:1px solid #3a4048;")
-        hlay = QHBoxLayout(header)
-        hlay.setContentsMargins(24, 0, 24, 0)
-        title_lbl = QLabel("⚙  Filament Winding CAM")
-        title_lbl.setStyleSheet("font-size:18pt; font-weight:bold; color:#5dade2;")
-        subtitle = QLabel("Advanced Composite Manufacturing Platform")
-        subtitle.setStyleSheet("font-size:10pt; color:#a0a8b0;")
-        hlay.addWidget(title_lbl)
-        hlay.addSpacing(16)
-        hlay.addWidget(subtitle)
-        hlay.addStretch()
-        ver_lbl = QLabel("v1.0")
-        ver_lbl.setStyleSheet("color:#5a6068; font-size:9pt;")
-        hlay.addWidget(ver_lbl)
-        root.addWidget(header)
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr = QFrame()
+        hdr.setFixedHeight(58)
+        hdr.setStyleSheet(f"background:#10151c; border-bottom:1px solid {C['border']};")
+        hl = QHBoxLayout(hdr); hl.setContentsMargins(22, 0, 22, 0)
+        tl = QLabel(f"⚙  {APP_NAME}")
+        tl.setStyleSheet(f"font:bold 17pt 'Segoe UI'; color:{C['accent']};")
+        self._status_dot = QLabel("●")
+        self._status_dot.setStyleSheet(f"color:{C['ok']}; font-size:14pt;")
+        self._status_txt = QLabel("Simulation ready")
+        self._status_txt.setStyleSheet(f"color:{C['dim']}; font:9pt 'Segoe UI';")
+        hl.addWidget(tl); hl.addSpacing(12)
+        hl.addWidget(self._status_dot); hl.addWidget(self._status_txt)
+        hl.addStretch()
+        settings_btn = QPushButton("⚙")
+        settings_btn.setFixedSize(34, 34)
+        settings_btn.setStyleSheet(f"background:{C['bg_panel']}; color:{C['dim']}; border:1px solid {C['border']}; border-radius:4px; font-size:13pt;")
+        settings_btn.clicked.connect(self._on_settings)
+        hl.addWidget(settings_btn)
+        root.addWidget(hdr)
 
-        # Body
-        body = QHBoxLayout()
-        body.setContentsMargins(24, 20, 24, 16)
-        body.setSpacing(24)
+        # ── Body ──────────────────────────────────────────────────────────────
+        body = QHBoxLayout(); body.setContentsMargins(22, 18, 22, 14); body.setSpacing(22)
         root.addLayout(body, stretch=1)
 
-        # Left: preview
-        preview_frame = QFrame()
-        preview_frame.setStyleSheet(
-            "background:#151a20; border:1px solid #3a4048; border-radius:8px;")
-        pf_lay = QVBoxLayout(preview_frame)
-        pf_lay.setContentsMargins(8, 8, 8, 8)
-        preview_title = QLabel("Live Path Preview")
-        preview_title.setStyleSheet("color:#a0a8b0; font-size:9pt;")
-        pf_lay.addWidget(preview_title)
+        # Left: winding preview
+        pf = QFrame()
+        pf.setStyleSheet(f"background:#10151c; border:1px solid {C['border']}; border-radius:8px;")
+        pfl = QVBoxLayout(pf); pfl.setContentsMargins(8, 8, 8, 8)
+        pl = QLabel("Live Path Preview")
+        pl.setStyleSheet(f"color:{C['muted']}; font:8pt 'Segoe UI'; border:none;")
+        pfl.addWidget(pl)
         self._preview = WindingPreviewWidget()
-        pf_lay.addWidget(self._preview, stretch=1)
-        body.addWidget(preview_frame, stretch=3)
+        pfl.addWidget(self._preview, stretch=1)
+        body.addWidget(pf, stretch=3)
 
-        # Right: buttons
-        right_col = QVBoxLayout()
-        right_col.setSpacing(12)
+        # Right: buttons + recent
+        right = QVBoxLayout(); right.setSpacing(10)
+        body.addLayout(right, stretch=2)
 
-        mode_lbl = QLabel("Select Mode")
-        mode_lbl.setStyleSheet(
-            "font-size:11pt; font-weight:bold; color:#a0a8b0;"
-            "border-bottom:1px solid #3a4048; padding-bottom:6px;")
-        right_col.addWidget(mode_lbl)
+        ml = QLabel("Select Mode")
+        ml.setStyleSheet(f"font:bold 10pt 'Segoe UI'; color:{C['dim']}; border-bottom:1px solid {C['border']}; padding-bottom:4px;")
+        right.addWidget(ml)
 
-        sim_btn = QPushButton("  Simulation Mode\n  No hardware required")
-        sim_btn.setStyleSheet(_btn_css('#1a3a5c', '#5dade2', '#2a5a8c', '#1e4470'))
-        sim_btn.setMinimumHeight(72)
-        sim_btn.clicked.connect(self._on_simulation)
-        right_col.addWidget(sim_btn)
+        modes = [
+            ("▶", "Simulation Mode",   "Full app · no hardware required",       '#1a3a5c', '#5dade2', '#1e4470'),
+            ("⚡", "Connect ESP32",     "Select COM port · live telemetry",      '#1a3a2a', '#5cb85c', '#1e4030'),
+            ("≡", "G-code Generator",  "Build winding programs · export .nc",   '#2a3038', '#e8eaed', '#323a44'),
+            ("◉", "3D Visualizer",     "Inspect fiber path on mandrel",         '#2a3038', '#e8eaed', '#323a44'),
+            ("⚙", "Settings",          "Workspace · port · display options",    '#2a3038', '#a0a8b0', '#323a44'),
+        ]
+        self._btns = []
+        for icon, title, sub, bg, fg, hv in modes:
+            b = _ModeBtn(icon, title, sub, _bs(bg, fg, hover=hv))
+            right.addWidget(b)
+            self._btns.append(b)
 
-        hw_btn = QPushButton("  Hardware Mode\n  Connect real ESP32")
-        hw_btn.setStyleSheet(_btn_css('#1a3a2a', '#5cb85c', '#2a5a3a', '#1e4030'))
-        hw_btn.setMinimumHeight(72)
-        hw_btn.clicked.connect(self._on_hardware)
-        right_col.addWidget(hw_btn)
+        self._btns[0].clicked.connect(self._on_simulation)
+        self._btns[1].clicked.connect(self._on_hardware)
+        self._btns[2].clicked.connect(self._on_gcode_gen)
+        self._btns[3].clicked.connect(lambda: self._launch(tab=1))
+        self._btns[4].clicked.connect(self._on_settings)
 
-        proj_btn = QPushButton("  Open Last Project\n  Resume saved recipe")
-        proj_btn.setStyleSheet(_btn_css('#2a3038', '#e8eaed', '#3a4048', '#323a44'))
-        proj_btn.setMinimumHeight(72)
-        proj_btn.clicked.connect(self._on_last_project)
-        right_col.addWidget(proj_btn)
+        right.addStretch()
 
-        gcode_btn = QPushButton("  Generate Sample G-code\n  Preview without opening app")
-        gcode_btn.setStyleSheet(_btn_css('#3a2a10', '#f0ad4e', '#5a4010', '#4a3010'))
-        gcode_btn.setMinimumHeight(72)
-        gcode_btn.clicked.connect(self._on_gcode)
-        right_col.addWidget(gcode_btn)
+        # ── Status bar ────────────────────────────────────────────────────────
+        sb = QFrame(); sb.setFixedHeight(26)
+        sb.setStyleSheet(f"background:#0a0e13; border-top:1px solid #1e2228;")
+        sl = QHBoxLayout(sb); sl.setContentsMargins(16, 0, 16, 0)
+        py_v  = sys.version.split()[0]
+        ps_v  = PySide6.__version__
+        ws_s  = str(WORKSPACE)
+        parts = [f"Python {py_v}", f"PySide6 {ps_v}", f"Workspace: {ws_s}", f"Log: {_LOG_FILE.name}"]
+        info  = QLabel("  ·  ".join(parts))
+        info.setStyleSheet(f"color:{C['muted']}; font:7pt Consolas;")
+        sl.addWidget(info); sl.addStretch()
+        root.addWidget(sb)
 
-        right_col.addStretch()
-        body.addLayout(right_col, stretch=2)
-
-        # Status bar
-        status_bar = QFrame()
-        status_bar.setFixedHeight(28)
-        status_bar.setStyleSheet(
-            "background:#0f141a; border-top:1px solid #2a3038;")
-        sb_lay = QHBoxLayout(status_bar)
-        sb_lay.setContentsMargins(16, 0, 16, 0)
-        py_ver = sys.version.split()[0]
-        pyside_ver = PySide6.__version__
-        self._status_lbl = QLabel(
-            f"Python {py_ver}  ·  PySide6 {pyside_ver}  ·  Simulation mode ready")
-        self._status_lbl.setStyleSheet("color:#5a6068; font-size:8pt;")
-        sb_lay.addWidget(self._status_lbl)
-        sb_lay.addStretch()
-        root.addWidget(status_bar)
-
-    # ── Button handlers ───────────────────────────────────────────────────────
+    # ── Handlers ──────────────────────────────────────────────────────────────
     def _on_simulation(self):
         os.environ['FW_LINK_KIND'] = 'mock'
-        self._launch_main()
+        self._launch(tab=1)
 
     def _on_hardware(self):
         dlg = PortPickerDialog(self)
-        self._apply_child_theme(dlg)
+        self._style_child(dlg)
         if dlg.exec() != QDialog.Accepted or not dlg.port:
             return
-        os.environ['FW_LINK_KIND'] = 'real'
-        os.environ['FW_LINK_PORT'] = dlg.port
-        os.environ['FW_LINK_BAUD'] = '921600'
-        self._launch_main()
+        os.environ.update({'FW_LINK_KIND': 'real', 'FW_LINK_PORT': dlg.port, 'FW_LINK_BAUD': '921600'})
+        self._status_dot.setStyleSheet(f"color:{C['ok']}; font-size:14pt;")
+        self._status_txt.setText(f"Connected: {dlg.port}")
+        log.info("Hardware mode selected: %s", dlg.port)
+        self._launch(tab=0)
 
-    def _on_last_project(self):
-        try:
-            from backend.persistence.recipe_db import RecipeDB
-            db = RecipeDB(_DB_PATH)
-            recipes = db.list_recipes()
-            if not recipes:
-                QMessageBox.information(
-                    self, "No saved projects",
-                    "No recipes found.\n\nSave a recipe in the Recipe Editor tab "
-                    "first, then use this button to reopen it.")
-                return
-        except Exception:
-            pass
+    def _on_gcode_gen(self):
         os.environ['FW_LINK_KIND'] = 'mock'
-        os.environ.setdefault('OPEN_LAST_RECIPE', '1')
-        self._launch_main(open_recipe_tab=True)
+        self._launch(tab=4)
 
-    def _on_gcode(self):
-        try:
-            from backend.core.winding_planner import WindingParams, generate_helical
-            params = WindingParams(
-                mandrel_R_mm=75.0, mandrel_L_mm=300.0,
-                alpha_deg=55.0, n_layers=4,
-                tow_width_mm=6.0, fiber_tension_N=15.0,
-                feed_mm_s=80.0)
-            prog = generate_helical(params)
-        except Exception as e:
-            QMessageBox.critical(self, "G-code error", str(e))
-            return
-
-        stats = (
-            f"Circuits: {prog.n_circuits}  ·  "
-            f"Total length: {prog.total_length_mm / 1000:.2f} m  ·  "
-            f"Est. time: {prog.estimated_time_s / 60:.1f} min  ·  "
-            f"Lines: {len(prog.lines)}"
-        )
-        dlg = GCodeDialog('\n'.join(prog.lines), stats, self)
-        self._apply_child_theme(dlg)
+    def _on_settings(self):
+        dlg = SettingsDialog(self)
+        self._style_child(dlg)
         dlg.exec()
 
-    def _apply_child_theme(self, dlg):
+    def _style_child(self, dlg):
         dlg.setStyleSheet(
-            "background:#1e2228; color:#e8eaed;"
-            "QComboBox{background:#2a3038; border:1px solid #3a4048;}"
-            "QPushButton{background:#2a3038; color:#e8eaed;"
-            "  border:1px solid #3a4048; border-radius:4px; padding:6px 12px;}"
-            "QPushButton:hover{background:#323a44;}"
+            f"background:{C['bg']}; color:{C['text']};"
+            f"QGroupBox{{border:1px solid {C['border']}; margin-top:10px; border-radius:4px;}}"
+            f"QGroupBox::title{{subcontrol-origin:margin; left:8px; color:{C['dim']};}}"
+            f"QLineEdit,QComboBox{{background:{C['bg_panel']}; border:1px solid {C['border']}; color:{C['text']}; border-radius:3px; padding:4px;}}"
+            f"QPushButton{{background:{C['bg_panel']}; color:{C['text']}; border:1px solid {C['border']}; border-radius:4px; padding:5px 10px;}}"
+            f"QPushButton:hover{{background:#323a44;}}"
         )
 
-    def _launch_main(self, open_recipe_tab: bool = False):
-        """Hide launcher and open the main FilamentWindingApp window."""
+    def _launch(self, tab: int = 1):
         self.hide()
         try:
             from app.main_window import FilamentWindingApp
             from app.link_factory import LinkConfig, make_link
-
-            cfg  = LinkConfig.from_env()
-            link = make_link(cfg)
-
+            os.environ.setdefault('FW_LINK_KIND', 'mock')
+            link = make_link(LinkConfig.from_env())
             self._main_window = FilamentWindingApp(link=link)
-            if open_recipe_tab:
-                # Switch to Recipe Editor tab (index 4)
-                self._main_window._tabs.setCurrentIndex(4)
+            self._main_window._tabs.setCurrentIndex(tab)
             self._main_window.show()
-            # When main window closes, close the whole app
             self._main_window.destroyed.connect(QApplication.quit)
+            log.info("Main app launched (tab=%d, link=%s)", tab, type(link).__name__)
         except Exception as e:
+            log.exception("Failed to launch main app")
             self.show()
             QMessageBox.critical(self, "Launch failed",
                 f"Could not start application:\n\n{e}\n\n"
-                "Check TROUBLESHOOTING.md for common fixes.")
-
+                "Check logs/ for details or see TROUBLESHOOTING.md.")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Entry point
+# 10 · Entry point
 # ─────────────────────────────────────────────────────────────────────────────
-def main():
+def main() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("Filament Winding CAM")
-    app.setOrganizationName("FilamentWinding")
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(SETTINGS_ORG)
     app.setStyle("Fusion")
 
-    # Apply base dark palette
-    from PySide6.QtGui import QPalette
-    palette = QPalette()
-    palette.setColor(QPalette.Window,          QColor(30, 34, 40))
-    palette.setColor(QPalette.WindowText,      QColor(232, 234, 237))
-    palette.setColor(QPalette.Base,            QColor(21, 26, 32))
-    palette.setColor(QPalette.AlternateBase,   QColor(37, 42, 50))
-    palette.setColor(QPalette.Text,            QColor(232, 234, 237))
-    palette.setColor(QPalette.Button,          QColor(42, 48, 56))
-    palette.setColor(QPalette.ButtonText,      QColor(232, 234, 237))
-    palette.setColor(QPalette.Highlight,       QColor(93, 173, 226))
-    palette.setColor(QPalette.HighlightedText, QColor(15, 20, 25))
-    app.setPalette(palette)
+    pal = QPalette()
+    for role, hex_col in [
+        (QPalette.Window,          '#1e2228'), (QPalette.WindowText,      '#e8eaed'),
+        (QPalette.Base,            '#0d1117'), (QPalette.AlternateBase,   '#252a32'),
+        (QPalette.Text,            '#e8eaed'), (QPalette.Button,          '#2a3038'),
+        (QPalette.ButtonText,      '#e8eaed'), (QPalette.Highlight,       '#5dade2'),
+        (QPalette.HighlightedText, '#0d1117'), (QPalette.ToolTipBase,     '#252a32'),
+        (QPalette.ToolTipText,     '#e8eaed'),
+    ]:
+        pal.setColor(role, QColor(hex_col))
+    app.setPalette(pal)
 
-    window = LauncherWindow()
-    window.show()
+    first_run = WorkspaceManager.setup()
+    log.info("Workspace: %s  (first_run=%s)", WORKSPACE, first_run)
+
+    splash = SplashScreen()
+    home   = HomeScreen()
+
+    def _on_ready(ok, results):
+        splash.close()
+        fails = [r for r in results if not r.ok and not r.optional]
+        if fails:
+            names = ', '.join(r.name for r in fails)
+            reply = QMessageBox.critical(None, "Missing dependencies",
+                f"Required packages not found:\n  {names}\n\n"
+                "Run install_deps_windows.bat then restart.\n"
+                "See TROUBLESHOOTING.md for details.",
+                QMessageBox.Ok | QMessageBox.Ignore)
+            if reply == QMessageBox.Ok:
+                log.error("Startup aborted — missing dependencies: %s", names)
+                app.quit(); return
+        home.show()
+        log.info("Home screen shown")
+
+    splash.ready.connect(_on_ready)
+    splash.show()
+    QTimer.singleShot(200, splash.start_checks)
+
     return app.exec()
 
 

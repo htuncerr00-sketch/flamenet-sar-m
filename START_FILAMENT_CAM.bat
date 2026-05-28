@@ -1,56 +1,52 @@
 @echo off
-REM ┌──────────────────────────────────────────────────────────────┐
-REM │  Filament Winding CAM — One-click Launcher                   │
-REM │  Double-click this file to start the application.            │
-REM │                                                              │
-REM │  First time? Run install_deps_windows.bat first.            │
-REM └──────────────────────────────────────────────────────────────┘
-
-setlocal EnableDelayedExpansion
+title Filament Winding CAM
 cd /d "%~dp0"
 
-REM ── Locate Python ───────────────────────────────────────────────────────────
-set "PYTHON="
+REM ── Find Python ──────────────────────────────────────────────────────────────
+set "PY="
 for %%P in (python3.exe python.exe) do (
-    if "!PYTHON!"=="" (
-        where %%P >nul 2>nul
-        if !ERRORLEVEL! == 0 set "PYTHON=%%P"
+    if not defined PY (
+        where %%P >nul 2>nul && set "PY=%%P"
     )
 )
-
-if "!PYTHON!"=="" (
+if not defined PY (
     echo.
-    echo  ERROR: Python not found.
+    echo  Filament Winding CAM could not start.
     echo.
-    echo  Please install Python 3.11+ from https://python.org
-    echo  and check "Add Python to PATH" during installation.
+    echo  Python was not found on this computer.
     echo.
-    echo  Then run install_deps_windows.bat before re-launching.
+    echo  To fix this:
+    echo    1. Go to https://www.python.org/downloads/
+    echo    2. Download Python 3.12 (Windows installer, 64-bit)
+    echo    3. Run the installer - CHECK "Add Python to PATH"
+    echo    4. Then run install_deps_windows.bat
+    echo    5. Then double-click this file again
+    echo.
     pause
     exit /b 1
 )
 
-REM ── Check PySide6 is installed ──────────────────────────────────────────────
-!PYTHON! -c "import PySide6" >nul 2>nul
-if !ERRORLEVEL! NEQ 0 (
+REM ── Check PySide6 ────────────────────────────────────────────────────────────
+%PY% -c "import PySide6" 2>nul
+if errorlevel 1 (
     echo.
-    echo  ERROR: PySide6 not installed.
+    echo  Filament Winding CAM could not start.
     echo.
-    echo  Run install_deps_windows.bat first, then try again.
+    echo  Required packages are not installed.
+    echo.
+    echo  To fix this:  double-click install_deps_windows.bat
+    echo  Then try again.
     echo.
     pause
     exit /b 1
 )
 
 REM ── Launch ───────────────────────────────────────────────────────────────────
-!PYTHON! app_launcher.py
-
-if !ERRORLEVEL! NEQ 0 (
+%PY% app_launcher.py
+if errorlevel 1 (
     echo.
-    echo  Application exited with an error.
-    echo  See TROUBLESHOOTING.md for common fixes.
+    echo  The application exited with an error.
+    echo  Check logs\ for details, or see TROUBLESHOOTING.md
     echo.
     pause
 )
-
-endlocal
