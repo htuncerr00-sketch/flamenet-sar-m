@@ -822,6 +822,7 @@ def verify_bringup(
         print(f"         Sync drops:        {parser.n_sync_drops}")
         ser.close()
         results["verdict"] = "STOP — UNSAFE"
+        results["overall_pass"] = False
         return results
 
     # ──────────────────────────────────────────────────────────────────
@@ -1028,6 +1029,11 @@ def verify_bringup(
         p5_ok       = (p5_delivery and p5_crc and p5_ina and p5_imu
                        and p5_therm and p5_halt and p5_nonan)
 
+        soak_extra = stats_soak.as_dict()
+        # n_crc_errors and n_sync_drops are tracked by FrameParser, not SoakStats
+        # (SoakStats.as_dict() returns 0 for both — do not let it overwrite)
+        soak_extra.pop("n_crc_errors", None)
+        soak_extra.pop("n_sync_drops", None)
         soak_dict = {
             "pass": p5_ok,
             "elapsed_s": round(soak_elapsed, 1),
@@ -1036,15 +1042,9 @@ def verify_bringup(
             "delivery_pct": round(delivery_soak * 100.0, 2),
             "n_crc_errors": soak_crc,
             "n_sync_drops": parser.n_sync_drops,
-            "n_seq_jumps": stats_soak.n_seq_jumps,
-            "n_nan_frames": stats_soak.n_nan_frames,
-            "n_safe_halt":  stats_soak.n_safe_halt,
-            "n_brownout":   stats_soak.n_brownout,
-            "n_watchdog_rst": stats_soak.n_watchdog_rst,
-            "n_thermal_shut": stats_soak.n_thermal_shut,
             "per_minute_frames": stats_soak.per_minute_frames,
         }
-        soak_dict.update(stats_soak.as_dict())
+        soak_dict.update(soak_extra)
         results["soak"] = soak_dict
 
         # Update final jitter and freeze after soak

@@ -306,15 +306,15 @@ if has_pattern "Guru Meditation Error"; then
     grep "Guru Meditation Error" "${LOG_FILE}" | head -3 >> "${ANALYSIS_FILE}"
 fi
 
-# Detect brownout
-if has_pattern -iE "brownout|BROWNOUT"; then
+# Detect brownout (has_pattern only takes one arg — use grep directly for multi-arg)
+if grep -qi "brownout" "${LOG_FILE}" 2>/dev/null; then
     BROWNOUT=1
     echo -e "  ${R}BROWNOUT detected in boot log${Z}"
     grep -i "brownout" "${LOG_FILE}" | head -3 >> "${ANALYSIS_FILE}"
 fi
 
-# Detect watchdog
-if has_pattern -E "WDT|watchdog|WATCHDOG|TG0WDT|TWDT"; then
+# Detect watchdog (same fix: grep directly with -E)
+if grep -qE "WDT|watchdog|WATCHDOG|TG0WDT|TWDT" "${LOG_FILE}" 2>/dev/null; then
     WDT=1
     echo -e "  ${R}WATCHDOG reset detected in boot log${Z}"
     grep -E "WDT|watchdog|WATCHDOG|TG0WDT|TWDT" "${LOG_FILE}" | head -3 >> "${ANALYSIS_FILE}"

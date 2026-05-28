@@ -27,7 +27,9 @@ OPERATOR                UART0 (115200)             UART1 (921600)          PC HO
    │
    ├─ Step 3: Flash firmware ────────────────────────────────────────────────────
    │  Terminal B:
-   │  ./bringup/flash_and_monitor.sh --no-monitor  (or use flash_and_monitor.sh)
+   │  ./bringup/flash_and_monitor.sh --no-build --no-flash  (if already built+flashed)
+   │  # or full flash:
+   │  ./bringup/flash_and_monitor.sh /dev/ttyUSB0
    │
    │                    rst:0x1 (PowerOn)                                 [receiving]
    │                    ets Jun  8 2016 …
@@ -248,7 +250,7 @@ If any of the following occur, **stop and diagnose before proceeding**:
 python bringup/serial_capture.py --port /dev/ttyUSB0
 
 # Terminal B — Flash
-./bringup/flash_and_monitor.sh --no-monitor --port /dev/ttyUSB0
+./bringup/flash_and_monitor.sh --no-build /dev/ttyUSB0    # skip build, monitor only
 # Windows:
 .\bringup\flash_and_monitor.ps1 -NoFlash:$false -Port COM3
 
