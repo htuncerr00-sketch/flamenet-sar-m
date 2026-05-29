@@ -7,14 +7,22 @@ iş mili dönüşü, taşıyıcı hareketi, payout gözü konumu, yatırılan fi
 
 Bu telemetri sim'i (digital_twin.py) DEĞİLDİR; gerçek CAM süreç ikizidir.
 
-Akış
-----
-1. Katman katman yol üret (büyüyen yarıçap)        → layer_buildup
-2. Her katman için S-eğrisi zamanlı hareket planla  → industrial_motion
-3. Küresel zaman çizelgesi oluştur (segmentleri birleştir)
-4. dt aralıklarla örnekle → TwinState çerçeveleri
-5. Göz dinamiğini uygula (atalet/gecikme)           → payout_dynamics
-6. Fiber yatırma haritası biriktir                  → fiber_deposition
+Akış (Sprint 4B mimarisi — DIGITAL_TWIN_ARCHITECTURE.md)
+--------------------------------------------------------
+1. Katman katman yol üret (büyüyen yarıçap)            → layer_buildup
+2. Her katman için S-eğrisi zamanlı hareket planla      → industrial_motion
+3. Küresel zaman çizelgesi segmentleri (açı ofsetli)    → TrajectorySegment
+4. Tekdüze dt ızgarasına örnekle (varsayılan dt=1.0 s)  → trajectory_builder
+5. Birinci-derece taşıyıcı gecikmesi: lag = v·τ         → (bounded, stable)
+6. Fiber yatırma haritası biriktir                      → fiber_deposition
+
+Sprint 4B düzeltmeleri
+----------------------
+- RPM artık küresel kümülatif açıdan türetilir; katman sınırı sıçraması yok
+  (eski 45.819 RPM hatası giderildi).
+- Kararsız PD göz-tepki simülasyonu (simulate_eye_response) çalışma yolundan
+  ÇIKARILDI; yerine sınırlı birinci-derece gecikme modeli kullanılır.
+- Varsayılan dt 0.05 s → 1.0 s (durum sayısı ~20× azaldı).
 """
 from __future__ import annotations
 import math
@@ -35,7 +43,9 @@ from .machine_envelope import MachineEnvelope
 from .path_generator import WindingPath, WindingPathParams
 from .payout_dynamics import (
     PayoutDynamicsConfig, compute_carriage_lead_safe,
-    simulate_eye_response,
+)
+from .trajectory_builder import (
+    TrajectorySegment, TwinTimeline, build_timeline,
 )
 
 
@@ -96,25 +106,23 @@ class TwinSimulationResult:
         )
 
 
-# ── İç: zaman çizelgesi segmenti ─────────────────────────────────────────────
+# ── İç: küresel zaman çizelgesi segmentleri ──────────────────────────────────
 
-@dataclass
-class _TimedSegment:
-    seg: SynchronizedSegment
-    layer: int
-    circuit: int
-    t_start: float
-    t_end: float
-    radius_mm: float    # Bu segmentin yüzey yarıçapı
-
-
-def _build_timeline(
+def _build_trajectory_segments(
     layered: LayeredPathResult,
     constraints: MotionConstraints,
-) -> Tuple[List[_TimedSegment], float, List[Tuple[float, float]]]:
-    """Tüm katmanların segmentlerini küresel zaman çizelgesinde birleştir."""
-    timed: List[_TimedSegment] = []
+) -> Tuple[List[TrajectorySegment], float, List[Tuple[float, float]]]:
+    """
+    Tüm katmanların S-eğrisi segmentlerini küresel zaman çizelgesinde birleştir.
+
+    KRİTİK: Her katmanın WindingPath'i kendi a_deg'ini 0'dan başlatır. Katmanlar
+    art arda eklenirken kümülatif iş mili açısı, bir önceki katmanın son açısı
+    kadar (a_offset) kaydırılır. Bu, küresel açının monoton artmasını sağlar ve
+    katman sınırındaki sahte Δa sıçramasını (eski 45.819 RPM hatası) önler.
+    """
+    segs_out: List[TrajectorySegment] = []
     t_cursor = 0.0
+    a_offset = 0.0
     layer_ranges: List[Tuple[float, float]] = []
 
     for layer_idx, path in enumerate(layered.paths):
@@ -122,20 +130,28 @@ def _build_timeline(
         r_layer = prof.avg_radius_mm
         layer_t0 = t_cursor
 
-        segs = plan_industrial_motion(path, constraints)
-        for s in segs:
-            # Segment devresini noktadan türet (a_start'a en yakın)
-            circuit = 0
-            timed.append(_TimedSegment(
-                seg=s, layer=layer_idx, circuit=circuit,
-                t_start=t_cursor, t_end=t_cursor + s.t_duration_s,
+        sync = plan_industrial_motion(path, constraints)
+        layer_final_a = 0.0
+        for s in sync:
+            segs_out.append(TrajectorySegment(
+                t_start=t_cursor,
+                t_end=t_cursor + s.t_duration_s,
+                x_start=s.x_start,
+                x_end=s.x_end,
+                a_start=a_offset + s.a_start,
+                a_end=a_offset + s.a_end,
+                layer=layer_idx,
+                circuit=0,
                 radius_mm=r_layer,
             ))
             t_cursor += s.t_duration_s
+            layer_final_a = max(layer_final_a, s.a_end)
 
+        # Bir sonraki katman bu katmanın son kümülatif açısından devam eder
+        a_offset += layer_final_a
         layer_ranges.append((layer_t0, t_cursor))
 
-    return timed, t_cursor, layer_ranges
+    return segs_out, t_cursor, layer_ranges
 
 
 def simulate_winding(
@@ -146,7 +162,7 @@ def simulate_winding(
     machine: Optional[MachineEnvelope] = None,
     tension: Optional[FiberTensionModel] = None,
     payout: Optional[PayoutDynamicsConfig] = None,
-    dt_s: float = 0.05,
+    dt_s: float = 1.0,
     hold_angle: bool = True,
     deposition_grid: Tuple[int, int] = (100, 240),
 ) -> TwinSimulationResult:
@@ -162,10 +178,16 @@ def simulate_winding(
     machine      : Makine zarfı (None ise varsayılan).
     tension      : Fiber gerilim modeli (None ise varsayılan).
     payout       : Payout göz dinamiği (None ise varsayılan).
-    dt_s         : Örnekleme zaman adımı (saniye).
+    dt_s         : Örnekleme zaman adımı (saniye). Varsayılan 1.0 s (Sprint 4B).
     hold_angle   : Sarma açısı sabit mi (True) yoksa Clairaut c mi (False).
     deposition_grid : (n_z, n_theta) yatırma haritası çözünürlüğü.
+
+    Belirleyicilik
+    --------------
+    Aynı girdiler + aynı dt_s → bit-aynı durum dizisi (rastgelelik yok).
     """
+    if dt_s <= 0:
+        raise ValueError("dt_s > 0 olmalı")
     if machine is None:
         machine = MachineEnvelope()
     if tension is None:
@@ -186,10 +208,10 @@ def simulate_winding(
         base_profile, band, base_params, n_layers, hold_angle=hold_angle
     )
 
-    # 2-3. Küresel zaman çizelgesi
-    timed, total_time, layer_ranges = _build_timeline(layered, constraints)
+    # 2-3. Küresel zaman çizelgesi segmentleri (açı ofsetli, monoton)
+    segs, total_time, layer_ranges = _build_trajectory_segments(layered, constraints)
 
-    if not timed or total_time <= 0:
+    if not segs or total_time <= 0:
         # Boş simülasyon
         dep = simulate_deposition(layered.paths, band, base_profile,
                                   deposition_grid[0], deposition_grid[1])
@@ -203,80 +225,46 @@ def simulate_winding(
             layer_time_ranges_s=layer_ranges,
         )
 
-    # 4. dt aralıklarla örnekle
-    n_samples = int(math.floor(total_time / dt_s)) + 1
-    times = np.arange(n_samples) * dt_s
+    # 4. Tekdüze dt ızgarasına örnekle (trajectory_builder — vektörize, deterministik)
+    timeline: TwinTimeline = build_timeline(segs, dt_s=dt_s, total_time_s=total_time)
+    n_samples = timeline.n_samples
 
-    seg_ends = np.array([ts.t_end for ts in timed])
+    # 5. Birinci-derece taşıyıcı gecikmesi: lag = v·τ (sınırlı, kararlı, salınımsız)
+    #    Kararsız PD izleyici (simulate_eye_response) ARTIK KULLANILMAZ.
+    tau = payout.eye_lag_time_const_s
+    lag_arr = timeline.carriage_v_mm_s * tau           # işaretli, |lag| ≤ v_max·τ
+    x_actual_arr = timeline.x_mm - lag_arr             # gerçek konum referansın gerisinde
+    max_lag = float(np.max(np.abs(lag_arr))) if n_samples else 0.0
+    max_rpm = timeline.max_rpm
 
-    x_des = np.zeros(n_samples)
-    a_des = np.zeros(n_samples)
-    layer_arr = np.zeros(n_samples, dtype=int)
-    circuit_arr = np.zeros(n_samples, dtype=int)
-    radius_arr = np.zeros(n_samples)
+    # Statik payout lead (nominal açı — eksenel öncülük için yeterli)
+    lead = compute_carriage_lead_safe(base_params.alpha_deg, payout.standoff_mm)
 
-    for i, t in enumerate(times):
-        si = int(np.searchsorted(seg_ends, t, side='left'))
-        si = min(si, len(timed) - 1)
-        ts = timed[si]
-        dur = ts.t_end - ts.t_start
-        f = (t - ts.t_start) / dur if dur > 1e-12 else 0.0
-        f = min(max(f, 0.0), 1.0)
-        x_des[i] = ts.seg.x_start + f * (ts.seg.x_end - ts.seg.x_start)
-        a_des[i] = ts.seg.a_start + f * (ts.seg.a_end - ts.seg.a_start)
-        layer_arr[i] = ts.layer
-        circuit_arr[i] = ts.circuit
-        radius_arr[i] = ts.radius_mm
-
-    # 5. Göz dinamiği (atalet/gecikme) — istenen taşıyıcı yörüngesi üzerinde
-    eye_resp = simulate_eye_response(times, x_des, payout)
-
-    # Hız ve RPM
-    v_arr = np.zeros(n_samples)
-    rpm_arr = np.zeros(n_samples)
-    if n_samples > 1:
-        v_arr[1:] = np.diff(x_des) / dt_s
-        da = np.diff(a_des)
-        rpm_arr[1:] = (da / dt_s) / 360.0 * 60.0  # deg/s → RPM
-
-    # Fiber birikimi: ds = hypot(dx, r·da_rad)
-    fiber_cum = np.zeros(n_samples)
-    if n_samples > 1:
-        dx = np.diff(x_des)
-        da_rad = np.radians(np.diff(a_des))
-        r_mid = (radius_arr[:-1] + radius_arr[1:]) * 0.5
-        ds = np.sqrt(dx ** 2 + (r_mid * da_rad) ** 2)
-        fiber_cum[1:] = np.cumsum(ds)
-
-    # Göz konumu: eksenel lead + radyal standoff
     states: List[TwinState] = []
-    max_rpm = 0.0
     for i in range(n_samples):
-        alpha_local = base_params.alpha_deg  # nominal; lead için yeterli
-        lead = compute_carriage_lead_safe(alpha_local, payout.standoff_mm)
-        travel_dir = math.copysign(1.0, v_arr[i]) if abs(v_arr[i]) > 1e-9 else 1.0
-        eye_x = x_des[i] + travel_dir * lead
-        eye_r = radius_arr[i] + payout.standoff_mm
-
-        max_rpm = max(max_rpm, abs(rpm_arr[i]))
+        v = float(timeline.carriage_v_mm_s[i])
+        travel_dir = math.copysign(1.0, v) if abs(v) > 1e-9 else 1.0
+        eye_x = float(timeline.x_mm[i]) + travel_dir * lead
+        eye_r = float(timeline.radius_mm[i]) + payout.standoff_mm
+        progress = (float(timeline.t_s[i]) / total_time * 100.0) if total_time > 0 else 0.0
 
         states.append(TwinState(
-            t_s=float(times[i]),
-            spindle_angle_deg=float(a_des[i]),
-            spindle_rpm=float(rpm_arr[i]),
-            carriage_x_mm=float(x_des[i]),
-            carriage_x_actual_mm=float(eye_resp.x_actual_mm[i]),
-            carriage_v_mm_s=float(v_arr[i]),
-            eye_x_mm=float(eye_x),
-            eye_r_mm=float(eye_r),
-            contact_z_mm=float(x_des[i]),
-            contact_r_mm=float(radius_arr[i]),
-            current_layer=int(layer_arr[i]),
-            current_circuit=int(circuit_arr[i]),
-            fiber_deposited_mm=float(fiber_cum[i]),
-            current_radius_mm=float(radius_arr[i]),
-            lag_error_mm=float(eye_resp.lag_error_mm[i]),
-            progress_pct=float(times[i] / total_time * 100.0),
+            t_s=float(timeline.t_s[i]),
+            spindle_angle_deg=float(timeline.a_deg[i]),
+            spindle_rpm=float(timeline.rpm[i]),
+            carriage_x_mm=float(timeline.x_mm[i]),
+            carriage_x_actual_mm=float(x_actual_arr[i]),
+            carriage_v_mm_s=v,
+            eye_x_mm=eye_x,
+            eye_r_mm=eye_r,
+            contact_z_mm=float(timeline.x_mm[i]),
+            contact_r_mm=float(timeline.radius_mm[i]),
+            current_layer=int(timeline.layer[i]),
+            current_circuit=int(timeline.circuit[i]),
+            fiber_deposited_mm=float(timeline.fiber_mm[i]),
+            current_radius_mm=float(timeline.radius_mm[i]),
+            lag_error_mm=float(lag_arr[i]),
+            progress_pct=progress,
         ))
 
     # 6. Yatırma haritası
@@ -293,7 +281,7 @@ def simulate_winding(
         base_radius_mm=base_profile.avg_radius_mm,
         final_radius_mm=layered.final_radius_mm,
         total_fiber_length_mm=layered.total_fiber_length_mm,
-        max_lag_error_mm=eye_resp.max_lag_error_mm,
+        max_lag_error_mm=max_lag,
         max_spindle_rpm=max_rpm,
         layer_time_ranges_s=layer_ranges,
     )

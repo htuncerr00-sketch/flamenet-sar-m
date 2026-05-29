@@ -615,6 +615,176 @@ def test_integration():
     close(final_tele["ilerleme_pct"], 100.0, 1.0, "oynatma sonunda %100")
 
 
+# ── Sprint 4B: Zamanlama / Kararlılık / Belirleyicilik ──────────────────────────
+
+def test_trajectory_builder():
+    section("Sprint 4B — Yörünge Üreticisi (trajectory_builder)")
+    from faz17_d1.core.trajectory_builder import (
+        TrajectorySegment, TwinTimeline, build_timeline,
+    )
+
+    # Bilinen iki segment: X 0→100mm, A 0→720° (5s); sonra X 100→100, A 720→1080° (5s)
+    segs = [
+        TrajectorySegment(0.0, 5.0, 0.0, 100.0, 0.0, 720.0, 0, 0, 50.0),
+        TrajectorySegment(5.0, 10.0, 100.0, 100.0, 720.0, 1080.0, 1, 0, 51.0),
+    ]
+    tl = build_timeline(segs, dt_s=1.0)
+
+    # Tekdüze dt
+    ok(tl.n_samples == 11, f"11 örnek (0..10s @ dt=1): {tl.n_samples}")
+    dts = np.diff(tl.t_s)
+    ok(np.allclose(dts, 1.0), "zaman ızgarası tekdüze (Δt=1.0)")
+
+    # Küresel açı monoton artan (sıfırlama yok)
+    ok(np.all(np.diff(tl.a_deg) >= -1e-9), "küresel açı monoton artan")
+    close(tl.a_deg[0], 0.0, 1e-9, "a(0)=0")
+    close(tl.a_deg[-1], 1080.0, 1e-6, "a(10)=1080°")
+
+    # RPM formülü: ilk 5s'de 720°/5s = 144°/s = 24 RPM
+    #   her 1s adımında Δa=144° → rpm = 144/360*60 = 24
+    close(tl.rpm[1], 24.0, 1e-6, "rpm = |Δa/Δt|/360×60 = 24")
+    # ikinci segment: 360°/5s = 72°/s → her adımda Δa=72° → rpm=12
+    close(tl.rpm[7], 12.0, 1e-6, "ikinci segment rpm = 12")
+    ok(np.all(tl.rpm >= 0.0), "rpm her zaman ≥ 0")
+
+    # Spindle hızı işaretli ama burada pozitif
+    close(tl.spindle_v_deg_s[1], 144.0, 1e-6, "iş mili hızı = 144°/s")
+
+    # Taşıyıcı hızı: ilk 5s'de 100mm/5s = 20mm/s
+    close(tl.carriage_v_mm_s[1], 20.0, 1e-6, "taşıyıcı hızı = 20mm/s")
+    # ikinci segmentte X sabit → hız 0
+    close(tl.carriage_v_mm_s[7], 0.0, 1e-9, "X sabitken taşıyıcı hızı = 0")
+
+    # index_at O(1) ve doğru
+    ok(tl.index_at(0.0) == 0, "index_at(0)=0")
+    ok(tl.index_at(10.0) == 10, "index_at(10)=10")
+    ok(tl.index_at(4.4) == 4, "index_at(4.4)=4 (round)")
+    ok(tl.index_at(4.6) == 5, "index_at(4.6)=5 (round)")
+    ok(tl.index_at(1e9) == tl.n_samples - 1, "aşırı t → son indeks (kenetli)")
+    ok(tl.index_at(-5.0) == 0, "negatif t → 0 (kenetli)")
+
+    # NaN yok
+    for name, arr in [("x", tl.x_mm), ("a", tl.a_deg), ("rpm", tl.rpm),
+                      ("v", tl.carriage_v_mm_s), ("fiber", tl.fiber_mm)]:
+        ok(not np.any(np.isnan(arr)), f"{name} dizisinde NaN yok")
+
+    # Fiber birikimi monoton
+    ok(np.all(np.diff(tl.fiber_mm) >= -1e-9), "fiber birikimi monoton artan")
+
+    # Yapılandırılabilir dt: daha küçük dt → daha çok örnek
+    tl_fine = build_timeline(segs, dt_s=0.5)
+    ok(tl_fine.n_samples == 21, f"dt=0.5 → 21 örnek: {tl_fine.n_samples}")
+
+    # dt ≤ 0 reddedilir
+    try:
+        build_timeline(segs, dt_s=0.0)
+        ok(False, "dt=0 ValueError beklenir")
+    except ValueError:
+        ok(True, "dt=0 ValueError")
+
+    # Boş segment listesi → boş zaman çizelgesi
+    empty = build_timeline([], dt_s=1.0)
+    ok(empty.n_samples == 0, "boş segment → boş zaman çizelgesi")
+
+
+def test_sprint4b_twin_timing():
+    section("Sprint 4B — Twin Zamanlama / Kararlılık / Belirleyicilik")
+    prof, params = _cyl(alpha=55.0, steps=30)
+    band = FiberBand(tow_width_mm=6.0, overlap_pct=5.0)
+    payout = PayoutDynamicsConfig(eye_lag_time_const_s=0.03, standoff_mm=150.0)
+    machine = MachineEnvelope()
+
+    res = simulate_winding(prof, band, params, n_layers=2, machine=machine,
+                           payout=payout, dt_s=1.0)
+
+    # ── RPM doğruluğu ────────────────────────────────────────────────────────
+    # Astronomik RPM hatası giderildi: makul üst sınır içinde
+    rpm_limit = machine.max_spindle_deg_s / 360.0 * 60.0  # = 300 RPM
+    ok(res.max_spindle_rpm <= rpm_limit + 1e-6,
+       f"maks RPM ≤ makine limiti ({res.max_spindle_rpm:.2f} ≤ {rpm_limit:.0f})")
+    ok(res.max_spindle_rpm < 1000.0, "maks RPM astronomik DEĞİL (eski hata yok)")
+    # Her durumda rpm = |Δa/Δt|/360×60 — örnekleme ile doğrula
+    for i in range(1, min(50, len(res.states))):
+        da = res.states[i].spindle_angle_deg - res.states[i - 1].spindle_angle_deg
+        dt = res.states[i].t_s - res.states[i - 1].t_s
+        expected = abs(da / dt) / 360.0 * 60.0 if dt > 0 else 0.0
+        if abs(res.states[i].spindle_rpm - expected) > 1e-6:
+            ok(False, f"rpm formülü durum {i}: {res.states[i].spindle_rpm} vs {expected}")
+            break
+    else:
+        ok(True, "rpm = |Δa/Δt|/360×60 tüm örneklerde doğru")
+    ok(res.max_spindle_rpm > 0.0, "maks RPM > 0 (iş mili dönüyor)")
+
+    # ── Sınırlı gecikme ──────────────────────────────────────────────────────
+    tau = payout.eye_lag_time_const_s
+    peak_v = max(abs(s.carriage_v_mm_s) for s in res.states)
+    expected_max_lag = peak_v * tau
+    ok(res.max_lag_error_mm <= expected_max_lag + 1e-6,
+       f"maks gecikme = peak_v·τ ile sınırlı ({res.max_lag_error_mm:.4f} ≤ {expected_max_lag:.4f})")
+    ok(res.max_lag_error_mm < 10.0, "gecikme < 10mm (eski 17.736mm hatası yok)")
+    # Her durumda lag = v·τ
+    for s in res.states:
+        if abs(s.lag_error_mm - s.carriage_v_mm_s * tau) > 1e-6:
+            ok(False, "lag = v·τ ihlali")
+            break
+    else:
+        ok(True, "gecikme = v·τ tüm durumlarda")
+
+    # ── Salınımsız (oscillation yok) ─────────────────────────────────────────
+    # Birinci-derece model: |x_actual − x_ref| = |lag| ≤ max_lag (büyüme yok)
+    max_dev = max(abs(s.carriage_x_actual_mm - s.carriage_x_mm) for s in res.states)
+    ok(max_dev <= res.max_lag_error_mm + 1e-6, "konum sapması gecikmeyle sınırlı (salınım yok)")
+    # x_actual makul aralıkta (patlama yok)
+    ok(all(-50.0 <= s.carriage_x_actual_mm <= 450.0 for s in res.states),
+       "gerçek taşıyıcı konumu sınırlı aralıkta (ıraksama yok)")
+
+    # ── NaN üretimi yok ──────────────────────────────────────────────────────
+    fields = ("t_s", "spindle_angle_deg", "spindle_rpm", "carriage_x_mm",
+              "carriage_x_actual_mm", "carriage_v_mm_s", "eye_x_mm", "eye_r_mm",
+              "fiber_deposited_mm", "current_radius_mm", "lag_error_mm", "progress_pct")
+    has_nan = False
+    for s in res.states:
+        for f in fields:
+            if math.isnan(getattr(s, f)) or math.isinf(getattr(s, f)):
+                has_nan = True
+                break
+        if has_nan:
+            break
+    ok(not has_nan, "hiçbir durum alanında NaN/Inf yok")
+
+    # ── Belirleyicilik ───────────────────────────────────────────────────────
+    res2 = simulate_winding(prof, band, params, n_layers=2, machine=machine,
+                            payout=payout, dt_s=1.0)
+    ok(len(res.states) == len(res2.states), "tekrar: aynı durum sayısı")
+    identical = all(
+        a.t_s == b.t_s and a.spindle_angle_deg == b.spindle_angle_deg
+        and a.carriage_x_mm == b.carriage_x_mm and a.spindle_rpm == b.spindle_rpm
+        and a.fiber_deposited_mm == b.fiber_deposited_mm
+        for a, b in zip(res.states, res2.states)
+    )
+    ok(identical, "tekrar: bit-aynı durum dizisi (deterministik)")
+
+    # ── Durum sayısı ölçeklenmesi ────────────────────────────────────────────
+    res_half = simulate_winding(prof, band, params, n_layers=2, machine=machine,
+                                payout=payout, dt_s=0.5)
+    ratio = len(res_half.states) / len(res.states)
+    ok(1.8 <= ratio <= 2.2, f"dt yarıya inince durum ~2× ({ratio:.2f})")
+    expected_n = int(math.floor(res.total_time_s / 1.0 + 1e-9)) + 1
+    ok(len(res.states) == expected_n, f"durum sayısı = floor(T/dt)+1 ({len(res.states)}={expected_n})")
+
+    # dt=1.0 dt=0.1'e göre ~10× daha az durum (eski 32k → 3k)
+    res_fine = simulate_winding(prof, band, params, n_layers=2, machine=machine,
+                                payout=payout, dt_s=0.1)
+    reduction = len(res_fine.states) / len(res.states)
+    ok(9.0 <= reduction <= 11.0, f"dt=1.0, dt=0.1'e göre ~10× az durum ({reduction:.1f}×)")
+
+    # ── state_at O(1) ────────────────────────────────────────────────────────
+    mid = res.state_at(res.total_time_s / 2.0)
+    ok(0 <= mid.progress_pct <= 100, "state_at orta nokta geçerli")
+    ok(res.state_at(0.0) is res.states[0], "state_at(0) ilk durum (O(1) indeks)")
+    ok(res.state_at(1e9) is res.states[-1], "state_at(∞) son durum (kenetli)")
+
+
 # ── Koşucu ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -629,6 +799,8 @@ def main():
         test_production_report,
         test_simulation_playback,
         test_integration,
+        test_trajectory_builder,
+        test_sprint4b_twin_timing,
     ]
     for s in suites:
         try:
