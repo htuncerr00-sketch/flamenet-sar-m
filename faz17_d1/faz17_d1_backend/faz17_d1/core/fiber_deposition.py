@@ -25,6 +25,40 @@ from .path_generator import WindingPath, WindingPoint
 _BAND_SAMPLES = 9
 
 
+def compaction_factor(
+    layer_index: int,
+    tension_N: float = 50.0,
+    radius_mm: float = 50.0,
+) -> float:
+    """
+    Katman dizinine göre sıkıştırma çarpanı (0 < factor ≤ 1).
+
+    Fizik (fiber yerleşimi / iç içe geçme modeli):
+    - Her yeni katman önceki katmanların vadilerine gömülür (nesting).
+    - Net efektif kalınlık artışı layer_index arttıkça azalır (üstel yakınsama).
+    - Yüksek gerilim → daha fazla radyal basınç → hafif ek incelme.
+    - Büyük yarıçap → eğrilik basıncı düşük → biraz daha az sıkıştırma.
+    - factor > 0 garantili → toplam laminat kalınlığı her zaman monotonik artar.
+
+    Model:  f(i) = (1 - N*(1-exp(-i/τ))) × tension_mod × radius_mod
+      N=0.12 : maks iç içe geçme fraksiyonu (yaklaşık %12 azalma)
+      τ=2.5  : yarılanma derinliği (katman)
+    """
+    nesting_frac = 0.12
+    tau = 2.5
+    nesting = nesting_frac * (1.0 - math.exp(-layer_index / tau)) if layer_index > 0 else 0.0
+
+    # Gerilim etkisi: referans 50 N; her 50 N üstünde %0.5 ek incelme
+    tension_ref = 50.0
+    tension_mod = max(0.85, 1.0 - 0.005 * max(0.0, tension_N - tension_ref) / tension_ref)
+
+    # Yarıçap etkisi: r↑ → eğrilik basıncı↓ → hafif daha az sıkıştırma
+    radius_ref = 50.0
+    radius_mod = min(1.0, max(0.90, 1.0 - 0.04 * max(0.0, radius_mm - radius_ref) / radius_ref))
+
+    return max(0.70, (1.0 - nesting) * tension_mod * radius_mod)
+
+
 @dataclass
 class UncoveredRegion:
     """Kaplanmamış yüzey bölgesi."""
@@ -63,6 +97,12 @@ class DepositionMap:
         """Kaplanan hücrelerin ortalama kalınlığı."""
         covered = self.thickness_mm[self.coverage_count > 0]
         return float(covered.mean()) if covered.size else 0.0
+
+    @property
+    def total_thickness_sum(self) -> float:
+        """Tüm hücrelerdeki toplam birikmiş kalınlık (mm).
+        Katman eklendikçe monotonik artar — katman karşılaştırmaları için kullan."""
+        return float(self.thickness_mm.sum())
 
     @property
     def max_thickness_mm(self) -> float:
@@ -173,18 +213,21 @@ def simulate_deposition(
     profile: MandrelProfile,
     n_z: int = 120,
     n_theta: int = 360,
+    tension_N: float = 50.0,
 ) -> DepositionMap:
     """
     Bir veya daha fazla katman yolunu yüzeye yatır.
 
     Her devre için bant ayak izi boyanır; her geçiş hücreye sıkıştırılmış
     kalınlık ekler ve o hücrenin yönelimini günceller (son geçiş).
+    Katman-bağımlı sıkıştırma `compaction_factor()` ile uygulanır.
 
     Parametreler
     ----------
-    paths : Katman yollarının listesi (tek katman için tek elemanlı liste).
-    band  : Fiber bant fiziği.
-    profile : Referans mandrel profili (ızgara ve yarıçap için).
+    paths     : Katman yollarının listesi (tek katman için tek elemanlı liste).
+    band      : Fiber bant fiziği.
+    profile   : Referans mandrel profili (ızgara ve yarıçap için).
+    tension_N : Payout gerilimi (Newton) — sıkıştırma hesabı için.
     """
     z0 = float(profile.z_mm[0])
     z1 = float(profile.z_mm[-1])
@@ -212,10 +255,18 @@ def simulate_deposition(
 
         temp = np.zeros((n_z, n_theta), dtype=bool)
 
-        for circuit_pts in circuits.values():
+        for circuit_key, circuit_pts in circuits.items():
             if len(circuit_pts) < 2:
                 continue
             temp[:] = False
+
+            layer_idx = circuit_key[0]  # (layer, circuit) tuple
+            r_mid_mm = float(np.interp(
+                float(np.mean([p.x_mm for p in circuit_pts])),
+                profile.z_mm, profile.r_mm,
+            ))
+            c_factor = compaction_factor(layer_idx, tension_N, r_mid_mm)
+            t_layer = t_ply * c_factor
 
             z_c = np.array([p.x_mm for p in circuit_pts])
             a_c = np.radians(np.array([p.a_deg for p in circuit_pts])) % (2.0 * math.pi)
@@ -247,8 +298,8 @@ def simulate_deposition(
             orientation[iz_v, ith_v] = alpha_v
             temp[iz_v, ith_v] = True
 
-            # Devre bazlı: her hücreye 1 kez kalınlık ekle
-            thickness += temp.astype(np.float64) * t_ply
+            # Devre bazlı: her hücreye 1 kez kalınlık ekle (katman sıkıştırması ile)
+            thickness += temp.astype(np.float64) * t_layer
             coverage += temp.astype(np.int32)
 
     return DepositionMap(

@@ -320,12 +320,43 @@ def test_fiber_deposition():
     regions = dep.find_uncovered_regions(min_area_mm2=1.0)
     ok(isinstance(regions, list), "kaplanmamış bölge listesi")
 
-    # İki katman tek katmandan daha kalın
-    dep1 = simulate_deposition([path], band, prof, n_z=40, n_theta=80)
+    # İki katman tek katmandan daha fazla toplam malzeme yatırır.
+    # Karşılaştırma: total_thickness_sum kullan (kaplama genişlemesi
+    # per-hücre ortalamayı düşürür ama toplam malzeme monotonik artar).
+    prof_1lyr = MandrelProfile.cylinder(300.0, 50.0, n_points=80)
+    params_1lyr = WindingPathParams(
+        profile=prof_1lyr, alpha_deg=55.0, n_layers=1,
+        tow_width_mm=6.0, overlap_pct=5.0, n_steps_per_pass=40,
+    )
+    path_1lyr = generate_path(params_1lyr)
+    dep_1lyr = simulate_deposition([path_1lyr], band, prof_1lyr, n_z=40, n_theta=80)
+
     res2 = generate_layered_paths(prof, band, params, n_layers=2, hold_angle=True)
     dep2 = simulate_deposition(res2.paths, band, prof, n_z=40, n_theta=80)
-    ok(dep2.mean_thickness_mm > dep1.mean_thickness_mm - 1e-9,
-       "2 katman ≥ 1 katman kalınlık")
+
+    ok(dep2.total_thickness_sum > dep_1lyr.total_thickness_sum - 1e-9,
+       "2 katman ≥ 1 katman toplam kalınlık toplamı")
+    ok(dep2.coverage_pct >= dep_1lyr.coverage_pct - 0.1,
+       "2 katman kaplama ≥ 1 katman kaplama")
+    ok(dep2.max_thickness_mm >= dep_1lyr.max_thickness_mm - 1e-9,
+       "2 katman maks kalınlık ≥ 1 katman")
+
+    # Sıkıştırma modeli: katman 0 > herhangi bir faktör ≤ 1
+    from faz17_d1.core.fiber_deposition import compaction_factor
+    cf0 = compaction_factor(0, tension_N=50.0, radius_mm=50.0)
+    cf1 = compaction_factor(1, tension_N=50.0, radius_mm=50.0)
+    cf3 = compaction_factor(3, tension_N=50.0, radius_mm=50.0)
+    ok(0.0 < cf0 <= 1.0, f"sıkıştırma faktörü katman-0 ∈ (0,1]: {cf0:.4f}")
+    ok(0.0 < cf1 <= 1.0, f"sıkıştırma faktörü katman-1 ∈ (0,1]: {cf1:.4f}")
+    ok(cf1 <= cf0 + 1e-9, "katman-1 sıkıştırma ≤ katman-0 (azalan artış)")
+    ok(cf3 <= cf1 + 1e-9, "katman-3 sıkıştırma ≤ katman-1")
+    ok(compaction_factor(0, tension_N=200.0) <= cf0 + 1e-9,
+       "yüksek gerilim → daha az ya da eşit sıkıştırma")
+
+    # Tekrarlı simülasyon bit-özdeş olmalı
+    dep2b = simulate_deposition(res2.paths, band, prof, n_z=40, n_theta=80)
+    ok(np.allclose(dep2.thickness_mm, dep2b.thickness_mm),
+       "yatırma simülasyonu belirleyici (bit-özdeş)")
 
 
 # ── Payout Dinamiği ───────────────────────────────────────────────────────────

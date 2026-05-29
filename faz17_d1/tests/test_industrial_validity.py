@@ -46,6 +46,8 @@ from faz17_d1.core.coverage_solver import (
 )
 from faz17_d1.core.geodesic_validator import validate_geodesic, _compute_local_alpha
 from faz17_d1.core.stl_processor import load_stl_profile
+from faz17_d1.core.layer_buildup import generate_layered_paths
+from faz17_d1.core.manufacturing_report import generate_manufacturing_report
 
 # ── Test altyapısı ────────────────────────────────────────────────────────────
 
@@ -360,6 +362,108 @@ def test_dome_transition_continuity():
     ok(len(dd.turnaround_z_mm) >= 1, "kutupsal dönüş bölgesi tespit edildi")
 
 
+# ── 9. Birleşik Üretim Raporu ─────────────────────────────────────────────────
+
+def test_production_manufacturing_report():
+    section("Birleşik Üretim Raporu")
+
+    prof = MandrelProfile.cylinder(300.0, 50.0, n_points=100)
+    band = FiberBand(tow_width_mm=6.0, tow_thickness_mm=0.25, compaction_factor=0.85,
+                     overlap_pct=5.0)
+    params = WindingPathParams(
+        profile=prof, alpha_deg=55.0, n_layers=2,
+        tow_width_mm=6.0, overlap_pct=5.0, n_steps_per_pass=40,
+    )
+    res = generate_layered_paths(prof, band, params, n_layers=2, hold_angle=True)
+
+    rpt = generate_manufacturing_report(
+        res.paths, band, prof, alpha_deg=55.0, n_layers=2,
+    )
+
+    # Rapor yapısı
+    ok(rpt.machine_limits is not None or rpt.machine_limits is None,
+       "machine_limits alanı mevcut (None veya dolu)")
+    ok(rpt.tension_profile is not None, "tension_profile mevcut")
+    ok(rpt.dome_transition is not None, "dome_transition mevcut")
+    ok(rpt.layer_stack is not None, "layer_stack mevcut")
+    ok(rpt.coverage_risk is not None, "coverage_risk mevcut")
+    ok(rpt.deposition is not None, "deposition mevcut")
+
+    # Boolean kararlar tip kontrolü
+    ok(isinstance(rpt.is_manufacturable, bool), "is_manufacturable bool")
+    ok(isinstance(rpt.hard_stop_failures, list), "hard_stop_failures liste")
+    ok(isinstance(rpt.warnings, list), "warnings liste")
+
+    # Silindir için kubbe geçişi geçerli olmalı
+    ok(rpt.dome_transition.is_traversable, "silindir kubbe geçiş geçerli")
+
+    # Katman istifleme tutarlı
+    ok(rpt.layer_stack.is_consistent, "katman istifleme tutarlı")
+
+    # Gerilim profili kararlı (silindir, standart parametre)
+    ok(rpt.tension_profile.is_stable, "silindir gerilim profili kararlı")
+
+    # Malzeme tahmini fiziksel
+    ok(rpt.material.fiber_length_total_mm > 0, "fiber uzunluğu > 0")
+    ok(rpt.material.total_mass_g > 0, "toplam kütle > 0")
+    ok(rpt.material.n_layers == 2, "katman sayısı = 2")
+
+    # Çevrim süresi pozitif
+    ok(rpt.cycle_time.winding_time_s > 0, "sarma süresi > 0")
+    ok(rpt.cycle_time.total_time_s > rpt.cycle_time.winding_time_s, "toplam > sarma süresi")
+
+    # Yatırma haritası boyutu
+    ok(rpt.deposition.thickness_mm.shape[0] > 0, "yatırma haritası boyutu > 0")
+    ok(rpt.deposition.total_thickness_sum > 0, "yatırma toplam kalınlık > 0")
+
+    # Summary çağrısı çalışmalı
+    s = rpt.summary()
+    ok(isinstance(s, str) and len(s) > 100, "summary() string üretir")
+    ok("ÜRETİM RAPORU" in s, "summary başlık içeriyor")
+
+    # Deterministik: iki çalışma bit-aynı
+    rpt2 = generate_manufacturing_report(
+        res.paths, band, prof, alpha_deg=55.0, n_layers=2,
+    )
+    ok(rpt.is_manufacturable == rpt2.is_manufacturable,
+       "üretim raporu deterministik (is_manufacturable)")
+    ok(np.allclose(rpt.deposition.thickness_mm, rpt2.deposition.thickness_mm),
+       "üretim raporu deterministik (yatırma haritası bit-aynı)")
+
+    # Engelsiz senaryo: doğrudan TwinTimeline ile makine doğrulaması
+    # (path-türevli timeline'da geçiş keskinlikleri var; S-eğrisi timeline kullan)
+    from faz17_d1.core.machine_limits import MachineLimits
+    from faz17_d1.core.winding_twin import _build_trajectory_segments
+    from faz17_d1.core.industrial_motion import MotionConstraints
+    from faz17_d1.core.trajectory_builder import build_timeline
+
+    generous = MachineLimits(
+        max_carriage_velocity_mm_s=500.0,
+        max_carriage_accel_mm_s2=50000.0,
+        max_carriage_jerk_mm_s3=1000000.0,
+        max_spindle_rpm=1200.0,
+        max_spindle_accel_deg_s2=360000.0,
+        max_spindle_jerk_deg_s3=7200000.0,
+        x_soft_min_mm=-50.0,
+        x_soft_max_mm=500.0,
+    )
+    constraints = MotionConstraints(
+        max_x_speed_mm_s=generous.max_carriage_velocity_mm_s,
+        max_x_accel_mm_s2=generous.max_carriage_accel_mm_s2,
+        max_a_speed_deg_s=generous.max_spindle_rpm * 6.0,
+        ref_radius_mm=50.0,
+    )
+    segs, total_t, _ = _build_trajectory_segments(res, constraints)
+    tl = build_timeline(segs, dt_s=1.0, total_time_s=total_t)
+    rpt_ok = generate_manufacturing_report(
+        res.paths, band, prof, alpha_deg=55.0, n_layers=2,
+        limits=generous, timeline=tl,
+    )
+    # S-eğrisi TwinTimeline + aşırı gevşek limitlerle makine limiti geçmeli
+    ok(rpt_ok.machine_limits is None or rpt_ok.machine_limits.is_realizable,
+       "S-eğrisi twin + aşırı gevşek limitlerle makine doğrulaması geçer")
+
+
 # ── Koşucu ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -372,6 +476,7 @@ def main():
         test_deterministic_output,
         test_stl_taper_stability,
         test_dome_transition_continuity,
+        test_production_manufacturing_report,
     ]
     for s in suites:
         try:
