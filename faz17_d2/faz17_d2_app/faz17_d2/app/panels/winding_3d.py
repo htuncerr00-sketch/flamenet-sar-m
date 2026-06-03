@@ -149,6 +149,7 @@ class Winding3DPanel(QWidget):
         self._fps_t0 = 0
         self._fps_frames = 0
         self._fps = 0.0
+        self._highlighted_layer: int = -1  # -1 = no highlight
 
         self._build_ui()
         self._refresh_timer = QTimer(self)
@@ -331,8 +332,12 @@ class Winding3DPanel(QWidget):
             colors = np.zeros((n, 4), dtype=np.float32)
             for i in range(n):
                 layer = min(n_layers - 1, i // max(n_per_layer, 1))
-                r, g, b = _hsv_to_rgb(layer / max(n_layers, 1), 0.85, 1.0)
-                colors[i] = [r, g, b, 0.9]
+                if self._highlighted_layer >= 0 and layer == self._highlighted_layer:
+                    colors[i] = [1.0, 1.0, 0.0, 1.0]  # bright yellow highlight
+                else:
+                    alpha = 0.3 if self._highlighted_layer >= 0 else 0.9
+                    r, g, b = _hsv_to_rgb(layer / max(n_layers, 1), 0.85, 1.0)
+                    colors[i] = [r, g, b, alpha]
         elif mode == "Gerilim":
             colors = np.zeros((n, 4), dtype=np.float32)
             for i in range(n):
@@ -399,6 +404,12 @@ class Winding3DPanel(QWidget):
             self._fps_lbl.setText(f"3D: {self._fps:.1f} FPS")
             self._fps_frames = 0
             self._fps_t0 = _t.monotonic()
+
+    @Slot(int)
+    def highlight_layer(self, layer_idx: int):
+        """Belirtilen katmanı sarı ile vurgula; -1 vurguyu kaldırır."""
+        self._highlighted_layer = layer_idx
+        self._rebuild_path_colors()
 
 
 def _hsv_to_rgb(h, s, v):

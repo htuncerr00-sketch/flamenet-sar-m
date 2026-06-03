@@ -41,6 +41,8 @@ from app.panels.cam_panel import CAMPanel
 from app.panels.proje_yoneticisi import ProjeYoneticisiPanel
 from app.panels.malzeme_kutuphanesi import MalzemeKutuphanesiPanel
 from app.panels.tabaka_yoneticisi import TabakaYoneticisiPanel
+from app.panels.katman_dizilim_paneli import KatmanDizilimPaneli
+from app.panels.uretim_tasarim_paneli import UretimTasarimPaneli
 from app.link_factory import LinkConfig, make_link
 
 
@@ -121,6 +123,8 @@ class FilamentWindingApp(QMainWindow):
         self._panel_proje    = ProjeYoneticisiPanel()
         self._panel_malzeme  = MalzemeKutuphanesiPanel()
         self._panel_tabaka   = TabakaYoneticisiPanel()
+        self._panel_katman   = KatmanDizilimPaneli()
+        self._panel_uretim   = UretimTasarimPaneli()
         self._panel_cam      = CAMPanel()
         self._panel_live     = LiveProductionPanel()
         self._panel_3d       = Winding3DPanel()
@@ -131,10 +135,12 @@ class FilamentWindingApp(QMainWindow):
         self._panel_commission = CommissioningPanel(self._motion, self._link)
         self._panel_pm       = PredictiveMaintenancePanel(self._pm)
 
-        # ── Tasarım iş akışı sekmeleri (ilk 4) ─────────────────────────────
+        # ── Tasarım iş akışı sekmeleri ──────────────────────────────────────
         self._tabs.addTab(self._panel_proje,   "Proje Yöneticisi")
         self._tabs.addTab(self._panel_malzeme, "Malzeme Kütüphanesi")
         self._tabs.addTab(self._panel_tabaka,  "Katman & Analiz")
+        self._tabs.addTab(self._panel_katman,  "Manuel Dizilim")
+        self._tabs.addTab(self._panel_uretim,  "Üretim Tasarım Merkezi")
         self._tabs.addTab(self._panel_cam,     "CAM Üretici")
         # ── Üretim & izleme sekmeleri ───────────────────────────────────────
         self._tabs.addTab(self._panel_live,        "Canlı Üretim")
@@ -225,19 +231,35 @@ class FilamentWindingApp(QMainWindow):
 
     def _connect_signals(self):
         # ── Tasarım iş akışı sinyalleri ──────────────────────────────────────
-        # Proje yöneticisi → malzeme + katman panelleri
+        # Proje yöneticisi → tüm tasarım panelleri
         self._panel_proje.malzemeSecildi.connect(
             self._panel_malzeme.select_material)
         self._panel_proje.malzemeSecildi.connect(
             self._panel_tabaka.set_material_key)
+        self._panel_proje.malzemeSecildi.connect(
+            self._panel_uretim.set_material_key)
+        self._panel_proje.projeYuklendi.connect(
+            self._panel_katman.apply_project)
+        self._panel_proje.projeYuklendi.connect(
+            self._panel_uretim.apply_project)
 
-        # Malzeme kütüphanesi → katman yöneticisi
+        # Malzeme kütüphanesi → katman yöneticileri
         self._panel_malzeme.malzemeSecildi.connect(
             self._panel_tabaka.set_material_key)
+        self._panel_malzeme.malzemeSecildi.connect(
+            self._panel_uretim.set_material_key)
 
         # Katman analizi raporu → proje yöneticisi (katman listesini güncelle)
         self._panel_tabaka.raporHazir.connect(
             self._panel_proje.apply_report)
+
+        # Manuel dizilim paneli sinyalleri
+        self._panel_katman.katmanDegisti.connect(
+            self._panel_uretim.set_layer_stack)
+        self._panel_katman.katmanSecildi.connect(
+            self._panel_3d.highlight_layer)
+        self._panel_katman.kaymaUyarisi.connect(
+            self._on_kayma_uyarisi)
 
         # Worker → panels
         w = self._worker
@@ -370,6 +392,21 @@ class FilamentWindingApp(QMainWindow):
         self._safety.clear_halt()
         self._panel_alarms.on_halt_cleared()
         self._panel_live.set_safety_status("ok")
+
+    @Slot(int, float)
+    def _on_kayma_uyarisi(self, layer_idx: int, slip_ratio: float):
+        """Manuel dizilim kayma uyarısını alarm paneline yönlendir."""
+        import time as _t
+        from backend.core.safety_controller import SafetyEvent, SafetyLevel
+        ev = SafetyEvent(
+            level=SafetyLevel.WARN,
+            code="SLIP_RATIO",
+            msg=f"Katman {layer_idx}: kayma oranı μ sınırını aştı",
+            value=slip_ratio,
+            threshold=0.5,
+            timestamp=_t.time(),
+        )
+        self._panel_alarms.on_safety_event(ev)
 
     @Slot()
     def _on_new_session(self):
