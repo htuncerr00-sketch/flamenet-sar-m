@@ -38,6 +38,9 @@ from app.panels.recipe_editor import RecipeEditor
 from app.panels.commissioning import CommissioningPanel
 from app.panels.predictive_maintenance import PredictiveMaintenancePanel
 from app.panels.cam_panel import CAMPanel
+from app.panels.proje_yoneticisi import ProjeYoneticisiPanel
+from app.panels.malzeme_kutuphanesi import MalzemeKutuphanesiPanel
+from app.panels.tabaka_yoneticisi import TabakaYoneticisiPanel
 from app.link_factory import LinkConfig, make_link
 
 
@@ -115,24 +118,32 @@ class FilamentWindingApp(QMainWindow):
         self.setCentralWidget(self._tabs)
 
         # Panels
-        self._panel_cam = CAMPanel()
-        self._panel_live = LiveProductionPanel()
-        self._panel_3d = Winding3DPanel()
+        self._panel_proje    = ProjeYoneticisiPanel()
+        self._panel_malzeme  = MalzemeKutuphanesiPanel()
+        self._panel_tabaka   = TabakaYoneticisiPanel()
+        self._panel_cam      = CAMPanel()
+        self._panel_live     = LiveProductionPanel()
+        self._panel_3d       = Winding3DPanel()
         self._panel_3d.set_winding_params(WindingParams())
-        self._panel_replay = ReplayPanel(self._telem_db)
-        self._panel_alarms = AlarmsPanel()
-        self._panel_recipe = RecipeEditor(self._recipe_db)
+        self._panel_replay   = ReplayPanel(self._telem_db)
+        self._panel_alarms   = AlarmsPanel()
+        self._panel_recipe   = RecipeEditor(self._recipe_db)
         self._panel_commission = CommissioningPanel(self._motion, self._link)
-        self._panel_pm = PredictiveMaintenancePanel(self._pm)
+        self._panel_pm       = PredictiveMaintenancePanel(self._pm)
 
-        self._tabs.addTab(self._panel_cam, "CAM Üretici")
-        self._tabs.addTab(self._panel_live, "Canlı Üretim")
-        self._tabs.addTab(self._panel_3d, "3D Görüntüleyici")
-        self._tabs.addTab(self._panel_alarms, "Alarmlar & Güvenlik")
-        self._tabs.addTab(self._panel_replay, "Tekrar Oynat")
-        self._tabs.addTab(self._panel_recipe, "Reçete Düzenleyici")
-        self._tabs.addTab(self._panel_commission, "Devreye Alma")
-        self._tabs.addTab(self._panel_pm, "Tahminsel Bakım")
+        # ── Tasarım iş akışı sekmeleri (ilk 4) ─────────────────────────────
+        self._tabs.addTab(self._panel_proje,   "Proje Yöneticisi")
+        self._tabs.addTab(self._panel_malzeme, "Malzeme Kütüphanesi")
+        self._tabs.addTab(self._panel_tabaka,  "Katman & Analiz")
+        self._tabs.addTab(self._panel_cam,     "CAM Üretici")
+        # ── Üretim & izleme sekmeleri ───────────────────────────────────────
+        self._tabs.addTab(self._panel_live,        "Canlı Üretim")
+        self._tabs.addTab(self._panel_3d,          "3D Görüntüleyici")
+        self._tabs.addTab(self._panel_alarms,      "Alarmlar & Güvenlik")
+        self._tabs.addTab(self._panel_replay,      "Tekrar Oynat")
+        self._tabs.addTab(self._panel_recipe,      "Reçete Düzenleyici")
+        self._tabs.addTab(self._panel_commission,  "Devreye Alma")
+        self._tabs.addTab(self._panel_pm,          "Tahminsel Bakım")
 
         # Menu bar
         self._build_menus()
@@ -213,6 +224,21 @@ class FilamentWindingApp(QMainWindow):
         sb.addPermanentWidget(self._sb_fps)
 
     def _connect_signals(self):
+        # ── Tasarım iş akışı sinyalleri ──────────────────────────────────────
+        # Proje yöneticisi → malzeme + katman panelleri
+        self._panel_proje.malzemeSecildi.connect(
+            self._panel_malzeme.select_material)
+        self._panel_proje.malzemeSecildi.connect(
+            self._panel_tabaka.set_material_key)
+
+        # Malzeme kütüphanesi → katman yöneticisi
+        self._panel_malzeme.malzemeSecildi.connect(
+            self._panel_tabaka.set_material_key)
+
+        # Katman analizi raporu → proje yöneticisi (katman listesini güncelle)
+        self._panel_tabaka.raporHazir.connect(
+            self._panel_proje.apply_report)
+
         # Worker → panels
         w = self._worker
         w.frameBatch.connect(self._panel_live.on_frame_batch)
@@ -471,7 +497,7 @@ class FilamentWindingApp(QMainWindow):
         if geom: self.restoreGeometry(geom)
         ws = settings.value("windowState")
         if ws: self.restoreState(ws)
-        tab = settings.value("currentTab", 0, type=int)  # 0 = CAM Üretici
+        tab = settings.value("currentTab", 0, type=int)  # 0 = Proje Yöneticisi
         if 0 <= tab < self._tabs.count():
             self._tabs.setCurrentIndex(tab)
 
