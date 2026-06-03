@@ -1,8 +1,14 @@
-# Filament Winding CAM — Gap Analysis & Development Roadmap
+# Filament Winding CAD/CAM/Mühendislik — Gap Analysis & Yol Haritası
 
 > **Audit kapsamı:** Faz 17 D1 (Python backend), Faz 17 D2 (PySide6 UI),
 > Faz 18 (RealESP32Link), Faz 19A/B (firmware), tüm yardımcı modüller.
 > Doküman tarihi: 2026-06-03. Hedef: ticari sınıf üretim hazırlığı.
+>
+> **2026-06-03 stratejik güncelleme:** Platform CAM-only'den
+> CAD/CAM/Mühendislik hibridine evrim. Mühendislik tabakası analizi
+> ayrı dokümanda: **`ENGINEERING_LAYER_ANALYSIS.md`** (12 mühendislik
+> yeteneği detaylı). Bu doküman CAM tabakası analizi sürdürür; yol
+> haritası mühendislik tabakası önceliği ile revize edildi.
 
 ---
 
@@ -176,45 +182,62 @@ boşluklar.**
 
 ---
 
-## 6. Geliştirme Yol Haritası (Faz 22 → Faz 27)
+## 6. Geliştirme Yol Haritası — REVİZE EDİLDİ (2026-06-03)
+
+**Stratejik pivot**: Mühendislik tabakası önce; sonra CAM uzantıları.
+Detay için `ENGINEERING_LAYER_ANALYSIS.md` §6 ve §8.
 
 ```
-Faz 22 (Tier-S çekirdek — 2-3 hafta):
-    ├─ non_geodesic_engine.py     (Madde 1)
-    ├─ geometry_engine.py ext.    (Madde 2: boss + opening)
-    └─ path_generator.py ext.     (Madde 3: turnaround dropoff)
-       + test_non_geodesic.py     (regresyon)
-       + GAP_ANALYSIS güncel
+✓ Faz 22 Madde 1 (TAMAMLANDI):
+    non_geodesic_engine.py + non_geodesic_validator.py
+    + test_non_geodesic.py (85/85 PASS)
+    Koussios çözücü + Wells bağımsız doğrulayıcı
 
-Faz 23 (Vessel mühendisliği — 1-2 hafta):
-    ├─ isotensoid_solver.py       (Madde 4)
-    ├─ pressure_vessel_check.py   (Madde 5)
-    └─ Malzeme μ tablosu          (Madde 6)
-       + test_isotensoid.py
-       + test_asme_compliance.py
+⏸ Faz 22 Madde 2 (ERTELENDİ → Faz 24):
+    geometry_engine boss + polar opening
+    Gerekçe: mühendislik tabakası boss boyutlandırma kriterlerini
+    sağlayacak; "manken boss" yerine "tasarımı yansıtan boss"
+    inşa etmek daha doğru.
 
-Faz 24 (Endüstriyel kontrolör portföyü — 2 hafta):
-    ├─ postprocessors/sinumerik.py    (Madde 7)
-    ├─ postprocessors/heidenhain.py   (Madde 8)
-    ├─ postprocessors/keba.py         (Madde 20)
-    ├─ Tool offset + makro              (Madde 9)
-    └─ Dry-run simülatörü her dialekt için
+⏸ Faz 22 Madde 3 (ERTELENDİ → Faz 24):
+    thickness_predictor turnaround dropoff
+    Gerekçe: dome mühendisliği (DRS §3.7) ile birlikte gelir.
 
-Faz 25 (Dinamik süreç — 1-2 hafta):
-    ├─ tension_dynamics.py        (Madde 10)
-    ├─ catenary_model.py          (Madde 11)
-    ├─ s_curve_motion.py          (Madde 12)
-    └─ adaptive_feed.py           (Madde 13)
+▶ Faz 23 — MÜHENDİSLİK MVE (yeni; ~1.5-2 hafta):
+    ENG-1 material_allowables.py     (A/B-basis + Tsai-Wu coeffs)
+    ENG-2 netting_analysis.py        (silindir kapalı-form)
+    ENG-3 clt_engine.py              (Q, Q̄, [A] matrisi)
+    ENG-4 failure_criterion.py       (Tsai-Wu + max stress)
+    ENG-5 burst_pressure.py          (netting + CLT yaklaşımları)
+    ENG-6 safety_factor.py           (ASME/ISO/AIAA kodları)
+    ENG-7 pressure_vessel_sizing.py  (silindir orkestratörü)
+    Hedef: silindirik basınçlı kap tasarım (input P → output schedule)
 
-Faz 26 (Kür & artık stres — 1 hafta):
-    ├─ cure_kinetics.py           (Madde 15)
-    └─ residual_stress.py
+▶ Faz 24 — GEOMETRİ + KUBBE MÜHENDİSLİĞİ (~2 hafta):
+    CAM-1 geometry_engine boss + polar opening (ex Faz 22 Madde 2)
+    CAM-2 thickness_predictor turnaround dropoff (ex Faz 22 Madde 3)
+    ENG-8 dome_engineering.py        (DRS §3.7)
+    ENG-9 isotensoid_dome.py         (optimal kubbe şekli)
+    ENG-10 boss_design.py             (bolt + interface)
+    ENG-11 netting_analysis dome uzantısı
 
-Faz 27 (Uyumluluk & yaşam döngüsü — 1-2 hafta):
-    ├─ compliance/as9100.py       (Madde 16)
-    ├─ compliance/asme_x.py
-    ├─ recipe_versioning.py       (Madde 17)
-    └─ tests/test_end_to_end.py   (Madde 18)
+▶ Faz 25 — TAM WORKFLOW + ENTEGRASYON (~1.5 hafta):
+    ENG-12 hoop_helical_optimizer.py
+    ENG-13 pressure_vessel_workflow.py
+    ENG-14 engineering_to_cam_bridge.py
+    ENG-15 progressive_damage.py
+    ENG-16 design_report_generator.py
+
+▶ Faz 26 — ENDÜSTRİYEL POST-PROCESSORS (eski Faz 24, ~2 hafta):
+    SINUMERIK + Heidenhain + KEBA + macro/offset + dry-run
+
+▶ Faz 27 — DİNAMİK SÜREÇ (eski Faz 25, ~1-2 hafta):
+    tension_dynamics + catenary + S-curve + adaptive feed
+
+▶ Faz 28 — KÜR & UYUMLULUK (eski Faz 26-27 birleştirilmiş, ~2 hafta):
+    cure_kinetics + residual_stress + AS9100 + ASME_X + audit trail
+
+TOPLAM: ~10-12 hafta tam ticarileşmeye
 ```
 
 ---
@@ -293,8 +316,15 @@ Her yeni modül için minimum gereksinimler:
 
 ---
 
-## 10. Sonraki Adım
+## 10. Sonraki Adım — REVİZE EDİLDİ
 
-**Faz 22 — Madde 1 (non_geodesic_engine.py) ile başlanması önerilir.**
-Doğrulama: Koussios örnekleri (cylinder-on-dome, axisymmetric ellipsoid).
-Tahmini süre: 2-3 gün + test paketi. Geriye dönük uyumluluk korunur.
+**Faz 22 Madde 1 TAMAMLANDI** (non_geodesic_engine.py + Wells doğrulayıcı +
+85/85 test).
+
+**Faz 22 Madde 2 ve 3 ERTELENDİ → Faz 24** — mühendislik tabakası önce
+gelmeli (gerekçe: `ENGINEERING_LAYER_ANALYSIS.md` §8).
+
+**Faz 23 ENG-MVE başlatılması önerilir.** İlk modül:
+`material_allowables.py` (A/B-basis allowables + Tsai-Wu coefficients +
+çevre knockdown faktörleri). `material_database` modülünün geri uyumlu
+uzantısı; sıfır regresyon.
