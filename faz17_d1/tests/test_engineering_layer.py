@@ -1047,6 +1047,282 @@ def test_group_16_FPF() -> None:
     _assert(res_th.max_FI > 0, "16.8d: tsai_hill FI>0")
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# GROUP 17 — ENG-5: Burst pressure
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_group_17_burst() -> None:
+    print("\n[GROUP 17] Burst pressure — netting + CLT")
+    from faz17_d1.core.burst_pressure import (
+        burst_pressure_netting_cylinder, burst_pressure_netting_sphere,
+        burst_pressure_clt_cylinder, estimate_burst_cylinder,
+        estimate_burst_sphere,
+    )
+    from faz17_d1.core.netting_analysis import MAGIC_ANGLE_DEG
+    from faz17_d1.core.material_allowables import get_engineering_material
+    from faz17_d1.core.clt_engine import make_helical_hoop_stackup
+    from faz17_d1.core.material_allowables import get_lamina
+
+    # 17.1: Vasiliev geri tutarlılık: t=1.5mm, P=20MPa, D=200mm, σ_f=2000MPa
+    # magic angle, t_α=1.5mm, t_h=0 ⟹ P_burst = 20 MPa
+    P, mode = burst_pressure_netting_cylinder(
+        diameter_mm=200.0, t_helical_mm=1.5,
+        alpha_deg=MAGIC_ANGLE_DEG, t_hoop_mm=0.0,
+        sigma_fiber_MPa=2000.0,
+    )
+    _assert_close(P, 20.0, 1e-3, 0.1,
+                  f"17.1: Vasiliev burst=20 MPa (got {P:.3f})")
+
+    # 17.2: Magic angle ile axial/hoop dengeli
+    # ⟹ P_axial = P_hoop için her ikisi de aynı; mode tüm bağıl olarak hoop
+    # (eşitlikte gevşek)
+    _assert(mode in ("axial", "hoop"), "17.2: limiting mode mantıklı")
+
+    # 17.3: Sphere burst: P = 4σt/D
+    P_s = burst_pressure_netting_sphere(200.0, 1.0, 2000.0)
+    _assert_close(P_s, 40.0, 1e-9, 1e-9, "17.3: sphere P = 4σt/D = 40 MPa")
+
+    # 17.4: Helisel-fazla laminat (t_hoop=0, α<magic) ⟹ hoop kritik
+    P_lim, mode_lim = burst_pressure_netting_cylinder(
+        200.0, 2.0, 30.0, 0.0, 2000.0,  # α=30°, sadece helisel
+    )
+    _assert(mode_lim == "hoop", f"17.4: helical-only düşük α → hoop kritik (got {mode_lim})")
+
+    # 17.5: estimate_burst_cylinder gerçek malzeme ile
+    mat = get_engineering_material("carbon_t700_epoxy_pv")
+    res = estimate_burst_cylinder(
+        diameter_mm=200.0, material=mat,
+        alpha_deg=MAGIC_ANGLE_DEG,
+        n_helical_pairs=4, n_hoop=2,
+        thickness_per_ply_mm=0.15,
+        method="clt_fpf",
+        basis="B",
+    )
+    _assert(res.P_burst_MPa > 0, f"17.5a: burst > 0 (got {res.P_burst_MPa:.2f})")
+    _assert(res.P_burst_design_MPa <= res.P_burst_MPa,
+            "17.5b: design burst <= raw burst (knockdown azaltıcı)")
+
+    # 17.6: Daha kalın laminat → daha yüksek burst
+    res2 = estimate_burst_cylinder(
+        diameter_mm=200.0, material=mat,
+        alpha_deg=MAGIC_ANGLE_DEG,
+        n_helical_pairs=8, n_hoop=4,
+        thickness_per_ply_mm=0.15,
+        method="clt_fpf", basis="B",
+    )
+    _assert(res2.P_burst_MPa > res.P_burst_MPa,
+            f"17.6: kalın laminat daha yüksek burst "
+            f"({res2.P_burst_MPa:.1f} > {res.P_burst_MPa:.1f})")
+
+    # 17.7: Aynı laminat netting vs CLT — CLT genellikle daha yüksek (matris katkısı)
+    res_net = estimate_burst_cylinder(
+        diameter_mm=200.0, material=mat,
+        alpha_deg=MAGIC_ANGLE_DEG,
+        n_helical_pairs=4, n_hoop=2,
+        thickness_per_ply_mm=0.15,
+        method="netting", basis="B",
+    )
+    # Aynı yığını CLT
+    res_clt = res  # 17.5'den
+    # Genellikle CLT >= netting ama bağımlılık var — sadece ikisinin de pozitif olduğunu kontrol et
+    _assert(res_net.P_burst_MPa > 0 and res_clt.P_burst_MPa > 0,
+            f"17.7: net={res_net.P_burst_MPa:.1f}, clt={res_clt.P_burst_MPa:.1f}")
+
+    # 17.8: estimate_burst_sphere
+    res_sph = estimate_burst_sphere(
+        diameter_mm=200.0, material=mat,
+        thickness_mm=2.0, basis="B",
+    )
+    _assert(res_sph.geometry == "sphere", "17.8a: sphere geometri")
+    _assert(res_sph.P_burst_MPa > 0, f"17.8b: sphere burst > 0 ({res_sph.P_burst_MPa:.2f})")
+
+    # 17.9: Hatalı method
+    try:
+        estimate_burst_cylinder(
+            200.0, mat, MAGIC_ANGLE_DEG, 4, 2,
+            method="bogus",
+        )
+        _assert(False, "17.9: bilinmeyen method reddedilmeli")
+    except ValueError:
+        _assert(True, "17.9: bilinmeyen method reddedildi")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# GROUP 18 — ENG-6: Safety factor + assessment
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_group_18_safety() -> None:
+    print("\n[GROUP 18] Safety factor — yönetmelikler ve MoS")
+    from faz17_d1.core.safety_factor import (
+        SafetyCode, get_safety_requirement, list_supported_codes,
+        assess_safety, required_burst_pressure,
+    )
+
+    # 18.1: ASME BPVC X — SF_burst = 2.25
+    req = get_safety_requirement(SafetyCode.ASME_BPVC_X)
+    _assert_close(req.SF_burst, 2.25, 1e-6, 1e-6,
+                  "18.1: ASME BPVC X SF_burst = 2.25")
+
+    # 18.2: ISO 11119-2 SF=2.25, DOT-CFFC SF=3.0
+    req_iso = get_safety_requirement(SafetyCode.ISO_11119_2)
+    _assert_close(req_iso.SF_burst, 2.25, 1e-6, 1e-6, "18.2a: ISO 11119-2 SF=2.25")
+    req_dot = get_safety_requirement(SafetyCode.DOT_CFFC)
+    _assert_close(req_dot.SF_burst, 3.0, 1e-6, 1e-6, "18.2b: DOT-CFFC SF=3.0")
+
+    # 18.3: AIAA S-080 SF=2.0
+    req_aiaa = get_safety_requirement(SafetyCode.AIAA_S_080)
+    _assert_close(req_aiaa.SF_burst, 2.0, 1e-6, 1e-6, "18.3: AIAA SF=2.0")
+
+    # 18.4: String'den enum çevirme
+    req_str = get_safety_requirement("asme_bpvc_x")
+    _assert(req_str.code == SafetyCode.ASME_BPVC_X, "18.4: string→enum")
+
+    # 18.5: Bilinmeyen kod string ValueError
+    try:
+        get_safety_requirement("uydurma_kod")
+        _assert(False, "18.5: bilinmeyen kod reddedilmeli")
+    except (ValueError, KeyError):
+        _assert(True, "18.5: bilinmeyen kod reddedildi")
+
+    # 18.6: Custom SF
+    req_c = get_safety_requirement(SafetyCode.CUSTOM, SF_burst_custom=2.5)
+    _assert_close(req_c.SF_burst, 2.5, 1e-6, 1e-6, "18.6a: CUSTOM SF=2.5")
+    try:
+        get_safety_requirement(SafetyCode.CUSTOM)  # eksik SF
+        _assert(False, "18.6b: CUSTOM eksik SF reddedilmeli")
+    except ValueError:
+        _assert(True, "18.6b: CUSTOM eksik SF reddedildi")
+
+    # 18.7: list_supported_codes ≥6 yönetmelik
+    codes = list_supported_codes()
+    _assert(len(codes) >= 6, f"18.7: ≥6 yönetmelik desteklenir (got {len(codes)})")
+
+    # 18.8: assess_safety — geçen durum
+    ass = assess_safety(P_operating_MPa=10.0, P_burst_estimated_MPa=30.0,
+                        code=SafetyCode.ASME_BPVC_X)
+    _assert(ass.passes, f"18.8a: P_burst=30, P_op=10, SF=3 → ASME geçer")
+    _assert_close(ass.SF_actual, 3.0, 1e-9, 1e-9, "18.8b: SF=30/10=3")
+    _assert_close(ass.margin_of_safety, 3.0 / 2.25 - 1.0, 1e-6, 1e-6,
+                  "18.8c: MoS = 3/2.25 - 1")
+
+    # 18.9: Yetersiz durum
+    ass = assess_safety(10.0, 20.0, SafetyCode.ASME_BPVC_X)
+    _assert(not ass.passes, "18.9a: P_burst=20 yetersiz (SF=2.0 < 2.25)")
+    _assert(ass.margin_of_safety < 0, f"18.9b: MoS < 0 ({ass.margin_of_safety:.3f})")
+
+    # 18.10: required_burst_pressure
+    rbp = required_burst_pressure(10.0, SafetyCode.ASME_BPVC_X)
+    _assert_close(rbp, 22.5, 1e-9, 1e-9,
+                  "18.10: req burst = 2.25 × 10 = 22.5 MPa")
+
+    # 18.11: Geçersiz P
+    try:
+        assess_safety(-1, 10, SafetyCode.ASME_BPVC_X)
+        _assert(False, "18.11: P_op<0 reddedilmeli")
+    except ValueError:
+        _assert(True, "18.11: P_op<0 reddedildi")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# GROUP 19 — ENG-7: Pressure vessel sizing orkestratör
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_group_19_pv_sizing() -> None:
+    print("\n[GROUP 19] Pressure vessel sizing — orkestratör")
+    from faz17_d1.core.pressure_vessel_sizing import (
+        VesselDesignInput, size_pressure_vessel,
+    )
+    from faz17_d1.core.safety_factor import SafetyCode
+    from faz17_d1.core.material_allowables import get_engineering_material
+
+    mat = get_engineering_material("carbon_t700_epoxy_pv")
+
+    # 19.1: Hafif kap (P=10 MPa, D=200 mm) — geçmeli
+    inp = VesselDesignInput(
+        P_operating_MPa=10.0, diameter_mm=200.0, length_mm=500.0,
+        material=mat, safety_code=SafetyCode.ASME_BPVC_X,
+        basis="B", max_iterations=20,
+    )
+    rep = size_pressure_vessel(inp)
+    _assert(rep.layer_schedule.n_total_plies > 0,
+            "19.1a: laminat üretildi")
+    _assert(rep.layer_schedule.total_thickness_mm > 0,
+            f"19.1b: t > 0 (got {rep.layer_schedule.total_thickness_mm:.3f})")
+    _assert(rep.safety_assessment.passes,
+            f"19.1c: SF kodu geçer "
+            f"(got {rep.safety_assessment.SF_actual:.2f}, "
+            f"req {rep.safety_assessment.SF_required:.2f})")
+
+    # 19.2: Burst tahminleri pozitif
+    _assert(rep.burst_clt.P_burst_design_MPa > 0,
+            f"19.2a: CLT burst > 0 (got {rep.burst_clt.P_burst_design_MPa:.2f})")
+    _assert(rep.burst_netting.P_burst_design_MPa > 0,
+            f"19.2b: netting burst > 0 (got {rep.burst_netting.P_burst_design_MPa:.2f})")
+
+    # 19.3: Kütle pozitif
+    _assert(rep.estimated_mass_kg > 0, f"19.3a: kütle > 0 ({rep.estimated_mass_kg:.3f})")
+    _assert(rep.estimated_fiber_mass_kg > 0, f"19.3b: fiber kütlesi > 0")
+    _assert(rep.estimated_fiber_length_mm > 0, "19.3c: fiber uzunluğu > 0")
+
+    # 19.4: Üretilebilirlik skoru 0-100
+    _assert(0.0 <= rep.manufacturability_score <= 100.0,
+            f"19.4: skor ∈ [0,100] ({rep.manufacturability_score:.1f})")
+
+    # 19.5: Daha yüksek basınç → daha kalın laminat
+    inp_high = VesselDesignInput(
+        P_operating_MPa=30.0, diameter_mm=200.0, length_mm=500.0,
+        material=mat, safety_code=SafetyCode.ASME_BPVC_X,
+    )
+    rep_high = size_pressure_vessel(inp_high)
+    _assert(rep_high.layer_schedule.total_thickness_mm >
+            rep.layer_schedule.total_thickness_mm,
+            f"19.5: yüksek P → kalın laminat "
+            f"({rep_high.layer_schedule.total_thickness_mm:.2f} > "
+            f"{rep.layer_schedule.total_thickness_mm:.2f})")
+
+    # 19.6: Daha katı yönetmelik (DOT SF=3.0) → daha kalın laminat
+    inp_dot = VesselDesignInput(
+        P_operating_MPa=10.0, diameter_mm=200.0, length_mm=500.0,
+        material=mat, safety_code=SafetyCode.DOT_CFFC,
+    )
+    rep_dot = size_pressure_vessel(inp_dot)
+    _assert(rep_dot.layer_schedule.total_thickness_mm >=
+            rep.layer_schedule.total_thickness_mm,
+            f"19.6: DOT (SF=3) ≥ ASME (SF=2.25) kalınlık "
+            f"({rep_dot.layer_schedule.total_thickness_mm:.2f} ≥ "
+            f"{rep.layer_schedule.total_thickness_mm:.2f})")
+
+    # 19.7: Custom α kullanıcı belirleyebilir
+    inp_alpha = VesselDesignInput(
+        P_operating_MPa=10.0, diameter_mm=200.0, length_mm=500.0,
+        material=mat, target_alpha_deg=25.0,
+    )
+    rep_alpha = size_pressure_vessel(inp_alpha)
+    _assert_close(rep_alpha.layer_schedule.alpha_deg, 25.0, 1e-9, 1e-9,
+                  "19.7: kullanıcı α uygulandı")
+
+    # 19.8: Summary string üretilebilir
+    s = rep.summary()
+    _assert("Basınçlı Kap" in s, "19.8a: summary Türkçe başlık")
+    _assert("MoS" in s, "19.8b: summary MoS içeriyor")
+
+    # 19.9: D/t > 20 (ince cidar) — başarı durumunda
+    Dt = rep.input.diameter_mm / rep.layer_schedule.total_thickness_mm
+    # Bu zorunlu değil — kalın cidar durumunda not düşülür
+    _assert(Dt > 5.0, f"19.9: D/t mantıklı oran (got {Dt:.1f})")
+
+    # 19.10: Geçersiz max_iterations
+    try:
+        inp_bad = VesselDesignInput(
+            P_operating_MPa=10.0, diameter_mm=200.0, length_mm=500.0,
+            material=mat, ply_thickness_override_mm=-0.5,
+        )
+        size_pressure_vessel(inp_bad)
+        _assert(False, "19.10: negatif ply kalınlığı reddedilmeli")
+    except ValueError:
+        _assert(True, "19.10: negatif ply kalınlığı reddedildi")
+
+
 GROUPS: List[Tuple[str, Callable[[], None]]] = [
     ("ENG-1: LaminaProperties validation", test_group_1_lamina_basic),
     ("ENG-1: Lamina catalog", test_group_2_lamina_catalog),
@@ -1064,6 +1340,9 @@ GROUPS: List[Tuple[str, Callable[[], None]]] = [
     ("ENG-3: Membrane solver", test_group_14_membrane),
     ("ENG-4: Failure indices", test_group_15_failure_indices),
     ("ENG-4: FPF analysis", test_group_16_FPF),
+    ("ENG-5: Burst pressure", test_group_17_burst),
+    ("ENG-6: Safety codes", test_group_18_safety),
+    ("ENG-7: PV sizing", test_group_19_pv_sizing),
 ]
 
 
