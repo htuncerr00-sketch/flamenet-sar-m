@@ -939,16 +939,149 @@ class UretimTasarimPaneli(QWidget):
             ]))
         return "\n".join(lines)
 
+    # ── ABAQUS — Clairaut tabanlı element-bazlı açı alanı ────────────────────
+
+    def _build_profile_for_fea(self):
+        """
+        Mandrel için (z_mm, r_mm, R_nominal) profil verisi döndür.
+
+        Öncelik geometry_engine.MandrelProfile motorudur; içe aktarılamazsa
+        saf-Python analitik fallback (kubbe için hemisfer, gövde için sabit R)
+        kullanılır. Böylece UI paneli numpy'a sıkı bağımlı kalmaz.
+        """
+        D = self._mandrel.get("cap_mm", 100.0)
+        L = self._mandrel.get("uzunluk_mm", 300.0)
+        R = D / 2.0
+        H = float(self._mandrel.get("kubbe_yukseklik_mm", 0.0) or 0.0)
+
+        # 1) Gerçek geometri motoru
+        try:
+            from backend.core.geometry_engine import MandrelProfile
+            if H > 1e-6:
+                prof = MandrelProfile.dome_cylinder_dome(L, R, H, n_points=90)
+            else:
+                prof = MandrelProfile.cylinder(L, R, n_points=30)
+            z = [float(v) for v in prof.z_mm]
+            r = [float(v) for v in prof.r_mm]
+            if z and r:
+                return z, r, R
+        except Exception:
+            pass
+
+        # 2) Saf-Python fallback (lineer/analitik interpolasyon)
+        z, r = [], []
+        if H > 1e-6:
+            n = 30
+            for k in range(n):                      # sol kubbe (hemisfer)
+                zz = H * k / (n - 1)
+                r.append(max(math.sqrt(max(0.0, 2 * R * zz - zz * zz)), R * 0.01))
+                z.append(zz)
+            for k in range(n):                      # silindir gövde
+                z.append(H + L * k / (n - 1)); r.append(R)
+            for k in range(n):                      # sağ kubbe
+                zl = H * k / (n - 1)
+                rr = math.sqrt(max(0.0, 2 * R * (H - zl) - (H - zl) ** 2))
+                z.append(H + L + zl); r.append(max(rr, R * 0.01))
+        else:
+            n = 24
+            for k in range(n):
+                z.append(L * k / (n - 1)); r.append(R)
+        return z, r, R
+
+    @staticmethod
+    def _downsample(z, r, target: int = 20):
+        """Yoğun profili FEA mesh'i için ~target halkaya indir (uçlar korunur)."""
+        n = len(z)
+        if n <= target:
+            return list(z), list(r)
+        step = (n - 1) / (target - 1)
+        idx = sorted({int(round(i * step)) for i in range(target)})
+        if idx[-1] != n - 1:
+            idx.append(n - 1)
+        return [z[i] for i in idx], [r[i] for i in idx]
+
+    @staticmethod
+    def _alpha_local_deg(alpha_nominal_deg: float,
+                         R_nominal: float, R_local: float) -> float:
+        """
+        Clairaut: c0 = R_nom·sin(α_nom);  α_local = arcsin(c0 / R_local).
+
+        Polar açıklıkta (c0/R_local ≥ 1) sinüs tanım kümesi aşılır →
+        güvenli sınır 90° (hoop yönelimi) atanır. Hata fırlatılmaz.
+        """
+        if R_local <= 1e-6 or R_nominal <= 1e-6:
+            return 90.0
+        c0 = R_nominal * math.sin(math.radians(abs(alpha_nominal_deg)))
+        ratio = c0 / R_local
+        if ratio >= 1.0:
+            return 90.0
+        return math.degrees(math.asin(ratio))
+
     def _gen_abaqus(self, _preview: bool = False) -> str:
         from datetime import datetime
+        layers = self._stack_dict.get("layers", [])
+
+        z_prof, r_prof, R_nom = self._build_profile_for_fea()
+        z_rings, r_rings = self._downsample(z_prof, r_prof, target=20)
+        n_rings = len(z_rings)
+        n_seg = 4 if _preview else 8        # önizlemede hafif mesh
+        H = float(self._mandrel.get("kubbe_yukseklik_mm", 0.0) or 0.0)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
         lines = [
-            "** ABAQUS Giriş Dosyası — Filament Sarma Katmanı Modeli",
-            f"** Üretildi: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "** ABAQUS Giriş Dosyası — Filament Sarma (Clairaut kubbe açı alanı)",
+            f"** Üretildi: {now}",
+            f"** Mandrel: D={self._mandrel.get('cap_mm', 0):.1f}mm  "
+            f"L={self._mandrel.get('uzunluk_mm', 0):.1f}mm  kubbe H={H:.1f}mm",
+            "** Açı modeli (Clairaut): a_local = arcsin(R_cyl*sin(a_nom)/R_local)",
+            "**   polar açıklıkta (oran>=1) güvenli sınır 90 derece (hoop) atanir.",
+            "**   Her ESET_R{j} ekseni halkasi kendi yerel acisini tasir.",
             "**",
             "*Heading",
-            " Filament Sarma Kompozit Kabuk Modeli",
+            " Filament Sarma Kompozit Kabuk — eleman bazli lif acisi",
             "**",
             "*Part, name=MANDREL",
+        ]
+
+        # ── Düğümler (dönel yüzey: halka × segment) ──────────────────────────
+        lines.append("*Node")
+        node_ids: List[List[int]] = []
+        nid = 0
+        for ri in range(n_rings):
+            zz = z_rings[ri]; rr = r_rings[ri]
+            row: List[int] = []
+            for si in range(n_seg):
+                theta = 2.0 * math.pi * si / n_seg
+                nid += 1
+                x = rr * math.cos(theta); y = rr * math.sin(theta)
+                lines.append(f"{nid}, {x:.4f}, {y:.4f}, {zz:.4f}")
+                row.append(nid)
+            node_ids.append(row)
+
+        # ── S4R kabuk elemanları (eksenel bant başına grup) ──────────────────
+        lines.append("*Element, type=S4R")
+        eid = 0
+        band_elems: List[List[int]] = []
+        for bi in range(n_rings - 1):
+            belems: List[int] = []
+            for si in range(n_seg):
+                s2 = (si + 1) % n_seg
+                n1 = node_ids[bi][si]
+                n2 = node_ids[bi][s2]
+                n3 = node_ids[bi + 1][s2]
+                n4 = node_ids[bi + 1][si]
+                eid += 1
+                lines.append(f"{eid}, {n1}, {n2}, {n3}, {n4}")
+                belems.append(eid)
+            band_elems.append(belems)
+
+        # ── Bant element setleri ─────────────────────────────────────────────
+        for bi, belems in enumerate(band_elems, start=1):
+            lines.append(f"*Elset, elset=ESET_R{bi}")
+            for k in range(0, len(belems), 16):
+                lines.append(", ".join(str(e) for e in belems[k:k + 16]))
+
+        lines += [
             "*End Part",
             "**",
             "*Assembly, name=Assembly",
@@ -956,26 +1089,40 @@ class UretimTasarimPaneli(QWidget):
             "*End Instance",
             "*End Assembly",
             "**",
-            "** Malzeme ve Laminat Tanımı",
+            "** Malzeme tanımları (her katman için ortotropik lamina)",
         ]
-        for i, lyr in enumerate(self._stack_dict.get("layers", []), start=1):
-            angle = lyr.get("alpha_deg", 45.0)
-            t     = lyr.get("thickness_mm", 0.3)
+        for i, _lyr in enumerate(layers, start=1):
             lines += [
                 f"*Material, name=PLY_{i}",
                 "*Elastic, type=LAMINA",
                 " 120000.,  8000.,  0.25,  5000.,  5000.,  4000.",
-                f"** Katman {i}: açı={angle:.1f}° kalınlık={t:.3f}mm",
             ]
+
+        # ── Eleman bazlı yönelim + kompozit kesit (ayrık açı alanı) ──────────
         lines += [
             "**",
-            "*Shell Section, elset=ALL, composite",
+            "** Eleman bazli yonelim ve laminat — kubbe aci sapmasi dahil.",
+            "** Silindirik sistem (Z ekseni); kompozit katman acilari yereldir.",
         ]
-        for i, lyr in enumerate(self._stack_dict.get("layers", []), start=1):
-            angle = lyr.get("alpha_deg", 45.0)
-            t     = lyr.get("thickness_mm", 0.3)
-            lines.append(f" {t:.4f}, 3, PLY_{i}, {angle:.2f}, PLY_{i}_ORI")
-        lines.append("*End Step")
+        for bi in range(1, n_rings):
+            R_local = 0.5 * (r_rings[bi - 1] + r_rings[bi])
+            lines += [
+                f"*Orientation, name=Ori_R{bi}, system=CYLINDRICAL",
+                " 0., 0., 0., 0., 0., 1.",
+                " 3, 0.",
+                f"*Shell Section, elset=ESET_R{bi}, composite, orientation=Ori_R{bi}",
+            ]
+            for i, lyr in enumerate(layers, start=1):
+                a_nom = abs(lyr.get("alpha_deg", 45.0))
+                t     = lyr.get("thickness_mm", 0.3)
+                a_loc = self._alpha_local_deg(a_nom, R_nom, R_local)
+                lines.append(f" {t:.4f}, 3, PLY_{i}, {a_loc:.2f}, PLY_{i}")
+
+        lines += [
+            "**",
+            "** Not: silindir govdede a_local≈a_nom; kubbeye dogru R_local",
+            "**      kuculur, Clairaut geregi a_local artar (→ polar yakininda 90).",
+        ]
         return "\n".join(lines)
 
     def _gen_nastran(self, _preview: bool = False) -> str:
@@ -1080,8 +1227,12 @@ class UretimTasarimPaneli(QWidget):
         self._schedule_analysis()
 
     def set_mandrel_parameters(self, D_mm: float, L_mm: float,
-                               P_MPa: float = 10.0) -> None:
-        self._mandrel = {"cap_mm": D_mm, "uzunluk_mm": L_mm, "basinc_MPa": P_MPa}
+                               P_MPa: float = 10.0,
+                               kubbe_yukseklik_mm: float = 0.0) -> None:
+        self._mandrel = {
+            "cap_mm": D_mm, "uzunluk_mm": L_mm, "basinc_MPa": P_MPa,
+            "kubbe_yukseklik_mm": kubbe_yukseklik_mm,
+        }
         self._schedule_analysis()
 
     def set_material_key(self, key: str) -> None:
@@ -1094,6 +1245,8 @@ class UretimTasarimPaneli(QWidget):
             "cap_mm": m.get("cap_mm", 100.0),
             "uzunluk_mm": m.get("uzunluk_mm", 300.0),
             "basinc_MPa": proje.get("basinc_MPa", 10.0),
+            "kubbe_yukseklik_mm": m.get("kubbe_yukseklik_mm", 0.0),
+            "tip": m.get("tip", "silindir"),
         }
         self._material_key = proje.get("malzeme", self._material_key)
         layers = proje.get("katmanlar", [])
