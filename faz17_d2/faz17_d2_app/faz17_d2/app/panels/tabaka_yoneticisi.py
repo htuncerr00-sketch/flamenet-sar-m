@@ -91,7 +91,9 @@ class TabakaYoneticisiPanel(QWidget):
     """
 
     # Başarılı analiz sonucunu diğer panellere ilet
-    raporHazir = Signal(object)  # VesselDesignReport
+    raporHazir        = Signal(object)          # VesselDesignReport
+    mandrelDegisti    = Signal(float, float, float)  # D_mm, L_mm, P_MPa
+    katmanYiginiHazir = Signal(dict)            # LayerStack uyumlu sözlük
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -275,6 +277,12 @@ class TabakaYoneticisiPanel(QWidget):
         self._lbl_toplam.setStyleSheet("color: #A0C8F0; font-size: 11px;")
         gv.addWidget(self._lbl_toplam)
         layout.addWidget(grp_tab)
+
+        # Mandrel boyutu değişimlerini sinyal otobüsüne bağla
+        self._cap.valueChanged.connect(self._on_mandrel_changed)
+        self._uzunluk.valueChanged.connect(self._on_mandrel_changed)
+        self._basinc.valueChanged.connect(self._on_mandrel_changed)
+
         layout.addStretch()
         return w
 
@@ -526,6 +534,10 @@ class TabakaYoneticisiPanel(QWidget):
         # Manuel tabloya öneriyi yükle
         self._load_schedule_to_table(report)
 
+        # ENG-7 katman yığınını diğer panellere otomatik besle
+        stack_dict = self._report_to_stack_dict(report)
+        self.katmanYiginiHazir.emit(stack_dict)
+
     @Slot(str)
     def _on_analysis_error(self, msg: str) -> None:
         self._res_durum.setText("Hata!")
@@ -601,3 +613,74 @@ class TabakaYoneticisiPanel(QWidget):
 
     def get_last_report(self):
         return self._last_report
+
+    @Slot()
+    def _on_mandrel_changed(self) -> None:
+        """Mandrel geometrisi değiştiğinde mandrelDegisti sinyalini yayınla."""
+        self.mandrelDegisti.emit(
+            self._cap.value(),
+            self._uzunluk.value(),
+            self._basinc.value(),
+        )
+
+    def set_mandrel_parameters(self, D_mm: float, L_mm: float,
+                               P_MPa: float = 10.0) -> None:
+        """Dışarıdan mandrel parametrelerini güncelle (sinyali bloke ederek)."""
+        self._cap.blockSignals(True)
+        self._uzunluk.blockSignals(True)
+        self._basinc.blockSignals(True)
+        try:
+            self._cap.setValue(D_mm)
+            self._uzunluk.setValue(L_mm)
+            self._basinc.setValue(P_MPa)
+        finally:
+            self._cap.blockSignals(False)
+            self._uzunluk.blockSignals(False)
+            self._basinc.blockSignals(False)
+
+    def _report_to_stack_dict(self, report) -> dict:
+        """VesselDesignReport → LayerStack.to_dict() uyumlu sözlük."""
+        try:
+            sch = report.layer_schedule
+            t   = sch.ply_thickness_mm
+            layers = []
+            for i in range(sch.n_helical_pairs):
+                layers.append({
+                    "id": i,
+                    "type": "helical",
+                    "layer_type": "helical",
+                    "alpha_deg": float(sch.alpha_deg),
+                    "fitil_genisligi_mm": 3.175,
+                    "cakisma_pct": 5.0,
+                    "thickness_mm": float(t),
+                    "feed_mm_s": 80.0,
+                    "spindle_rpm": 60.0,
+                    "friction_mu": 0.3,
+                    "strategy": "geodesic",
+                    "label": f"Sarmal ±{sch.alpha_deg:.0f}°",
+                    "notes": "ENG-7 otomatik",
+                })
+            for j in range(sch.n_hoop):
+                layers.append({
+                    "id": sch.n_helical_pairs + j,
+                    "type": "hoop",
+                    "layer_type": "hoop",
+                    "alpha_deg": 89.5,
+                    "fitil_genisligi_mm": 3.175,
+                    "cakisma_pct": 5.0,
+                    "thickness_mm": float(t),
+                    "feed_mm_s": 60.0,
+                    "spindle_rpm": 60.0,
+                    "friction_mu": 0.3,
+                    "strategy": "geodesic",
+                    "label": "Çevre 90°",
+                    "notes": "ENG-7 otomatik",
+                })
+            return {
+                "versiyon": "1.0",
+                "default_friction_mu": 0.3,
+                "next_id": len(layers),
+                "layers": layers,
+            }
+        except Exception:
+            return {"layers": []}

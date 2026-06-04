@@ -268,6 +268,13 @@ class FilamentWindingApp(QMainWindow):
         self._panel_tabaka.raporHazir.connect(
             self._panel_proje.apply_report)
 
+        # Mandrel boyutu değişimini tüm tasarım panellerine yayınla
+        self._panel_tabaka.mandrelDegisti.connect(
+            self._on_mandrel_geometry_changed)
+        # ENG-7 katman yığını → üretim tasarım merkezine otomatik besle
+        self._panel_tabaka.katmanYiginiHazir.connect(
+            self._panel_uretim.set_layer_stack)
+
         # Manuel dizilim paneli sinyalleri
         self._panel_katman.katmanDegisti.connect(
             self._panel_uretim.set_layer_stack)
@@ -468,6 +475,13 @@ class FilamentWindingApp(QMainWindow):
             timestamp=_t.time(),
         )
         self._panel_alarms.on_safety_event(ev)
+
+    @Slot(float, float, float)
+    def _on_mandrel_geometry_changed(self, D_mm: float, L_mm: float,
+                                     P_MPa: float) -> None:
+        """Mandrel geometrisi değiştiğinde tüm tasarım panellerini güncelle."""
+        self._panel_katman.set_mandrel_parameters(D_mm, L_mm, P_MPa)
+        self._panel_uretim.set_mandrel_parameters(D_mm, L_mm, P_MPa)
 
     @Slot()
     def _on_new_session(self):
