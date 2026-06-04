@@ -16,7 +16,7 @@ from typing import List, Optional
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Slot, Signal
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QGroupBox, QLabel, QFrame)
+    QGroupBox, QLabel, QFrame, QPushButton, QProgressBar, QSlider)
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
@@ -34,6 +34,13 @@ class LiveProductionPanel(QWidget):
 
     REFRESH_HZ = 30
     HISTORY_POINTS = 1500   # 50s @ 30Hz coalesced
+
+    # ── Üretim kontrol sinyalleri (main_window üzerinden engine'e yönlenir) ──
+    sarmaBaslat  = Signal()
+    sarmaDuraklat = Signal()
+    sarmaDevam   = Signal()
+    sarmaAcilDur  = Signal()
+    sarmaSifirla  = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -72,6 +79,95 @@ class LiveProductionPanel(QWidget):
         title_row.addWidget(self._running_led)
         title_row.addWidget(self._fps_lbl)
         layout.addLayout(title_row)
+
+        # ── Üretim kontrol çubuğu ──────────────────────────────────────────────
+        ctrl_box = QGroupBox("Üretim Kontrolü")
+        ctrl_box.setStyleSheet("QGroupBox { color: #A0C8F0; font-weight: bold; }")
+        ctrl_lay = QHBoxLayout(ctrl_box)
+        ctrl_lay.setSpacing(8)
+
+        self._btn_basla = QPushButton("▶  Sarmayı Başlat")
+        self._btn_basla.setMinimumHeight(38)
+        self._btn_basla.setStyleSheet(
+            "QPushButton{background:#1A5A1A;color:white;font-weight:bold;"
+            "border:none;border-radius:4px;padding:0 14px;}"
+            "QPushButton:hover{background:#267A26;}"
+            "QPushButton:disabled{background:#2A2A3A;color:#606060;}")
+        self._btn_basla.clicked.connect(self.sarmaBaslat)
+        ctrl_lay.addWidget(self._btn_basla)
+
+        self._btn_duraklat = QPushButton("⏸  Duraklat")
+        self._btn_duraklat.setMinimumHeight(38)
+        self._btn_duraklat.setEnabled(False)
+        self._btn_duraklat.setStyleSheet(
+            "QPushButton{background:#4A4A00;color:white;font-weight:bold;"
+            "border:none;border-radius:4px;padding:0 14px;}"
+            "QPushButton:hover{background:#6A6A00;}"
+            "QPushButton:disabled{background:#2A2A3A;color:#606060;}")
+        self._btn_duraklat.clicked.connect(self.sarmaDuraklat)
+        ctrl_lay.addWidget(self._btn_duraklat)
+
+        self._btn_devam = QPushButton("▶▶  Devam Et")
+        self._btn_devam.setMinimumHeight(38)
+        self._btn_devam.setEnabled(False)
+        self._btn_devam.setStyleSheet(
+            "QPushButton{background:#004A4A;color:white;font-weight:bold;"
+            "border:none;border-radius:4px;padding:0 14px;}"
+            "QPushButton:hover{background:#006A6A;}"
+            "QPushButton:disabled{background:#2A2A3A;color:#606060;}")
+        self._btn_devam.clicked.connect(self.sarmaDevam)
+        ctrl_lay.addWidget(self._btn_devam)
+
+        self._btn_estop = QPushButton("⚠  ACİL DURDUR")
+        self._btn_estop.setMinimumHeight(38)
+        self._btn_estop.setStyleSheet(
+            "QPushButton{background:#8A0000;color:white;font-weight:bold;"
+            "border:none;border-radius:4px;padding:0 14px;}"
+            "QPushButton:hover{background:#AA0000;}")
+        self._btn_estop.clicked.connect(self.sarmaAcilDur)
+        ctrl_lay.addWidget(self._btn_estop)
+
+        self._btn_sifirla = QPushButton("↺  Sıfırla")
+        self._btn_sifirla.setMinimumHeight(38)
+        self._btn_sifirla.setStyleSheet(
+            "QPushButton{background:#252540;color:#C0C0E0;"
+            "border:1px solid #3A3A5C;border-radius:4px;padding:0 14px;}"
+            "QPushButton:hover{background:#3A3A60;}")
+        self._btn_sifirla.clicked.connect(self.sarmaSifirla)
+        ctrl_lay.addWidget(self._btn_sifirla)
+
+        ctrl_lay.addStretch()
+
+        self._durum_lbl = QLabel("Hazır")
+        self._durum_lbl.setStyleSheet(
+            "color:#A0C8F0;font-weight:bold;font-size:13px;")
+        ctrl_lay.addWidget(self._durum_lbl)
+
+        layout.addWidget(ctrl_box)
+
+        # ── İlerleme çubuğu ────────────────────────────────────────────────────
+        prog_box = QGroupBox("Sarma İlerlemesi")
+        prog_box.setStyleSheet("QGroupBox { color: #A0C8F0; font-weight: bold; }")
+        prog_lay = QHBoxLayout(prog_box)
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 1000)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setFormat("%p%")
+        self._progress_bar.setMinimumHeight(22)
+        self._progress_bar.setStyleSheet(
+            "QProgressBar{background:#1A1A2E;border:1px solid #3A3A5C;"
+            "color:#E8E8E8;text-align:center;}"
+            "QProgressBar::chunk{background:qlineargradient("
+            "x1:0,y1:0,x2:1,y2:0,stop:0 #1A5A8A,stop:1 #30A0E0);}")
+        prog_lay.addWidget(self._progress_bar, stretch=4)
+
+        self._prog_info_lbl = QLabel("—  Katman: —/—  Devre: —/—  Hız: —")
+        self._prog_info_lbl.setStyleSheet("color:#A0C8F0;font-size:11px;")
+        prog_lay.addWidget(self._prog_info_lbl, stretch=3)
+
+        layout.addWidget(prog_box)
 
         # Metric cards row
         metric_row = QHBoxLayout()
@@ -164,6 +260,55 @@ class LiveProductionPanel(QWidget):
         self._quality_card.set_status(
             "ok" if f.quality > 85 else
             "warn" if f.quality > 70 else "crit")
+
+    @Slot(dict)
+    def on_production_status(self, d: dict) -> None:
+        """Motor durum paketini ilerleme çubuğu + bilgi etiketine yaz."""
+        pct = float(d.get("yuzde", 0.0))
+        self._progress_bar.setValue(int(pct * 10))   # 0..1000
+
+        katman  = d.get("katman", "—")
+        t_kat   = d.get("toplam_katman", "—")
+        devre   = d.get("devre", "—")
+        t_dev   = d.get("toplam_devre", "—")
+        hiz     = d.get("hiz_mm_dak", 0.0)
+        gecen   = d.get("gecen_s", 0.0)
+        toplam  = d.get("toplam_s", 0.0)
+
+        # Kalan süre tahmini
+        kalan_s = max(0.0, toplam - gecen)
+        dk, sn = divmod(int(kalan_s), 60)
+        kalan_str = f"{dk}d {sn:02d}s" if dk else f"{sn}s"
+
+        self._prog_info_lbl.setText(
+            f"{pct:.1f}%  Katman: {katman}/{t_kat}  "
+            f"Devre: {devre}/{t_dev}  "
+            f"Hız: {hiz:.0f} mm/dak  "
+            f"Kalan: {kalan_str}")
+
+    @Slot(str)
+    def on_production_state(self, durum: str) -> None:
+        """Durum adı değişiminde butonları güncelle."""
+        self._durum_lbl.setText(durum)
+        calisiyor   = (durum == "Sarılıyor")
+        duraklatildi = (durum == "Duraklatıldı")
+        acil_durdu  = (durum == "ACİL DURDU")
+        tamamlandi  = (durum == "Tamamlandı")
+        hazir       = (durum == "Hazır")
+
+        self._btn_basla.setEnabled(hazir or tamamlandi or acil_durdu)
+        self._btn_duraklat.setEnabled(calisiyor)
+        self._btn_devam.setEnabled(duraklatildi)
+
+        color = {
+            "Sarılıyor":   "#50FF50",
+            "Duraklatıldı": "#FFB050",
+            "ACİL DURDU":  "#FF5050",
+            "Tamamlandı":  "#50A0FF",
+        }.get(durum, "#A0C8F0")
+        self._durum_lbl.setStyleSheet(
+            f"color:{color};font-weight:bold;font-size:13px;")
+        self.set_running_status(calisiyor)
 
     @Slot(int)
     def on_connection_state(self, state: int):

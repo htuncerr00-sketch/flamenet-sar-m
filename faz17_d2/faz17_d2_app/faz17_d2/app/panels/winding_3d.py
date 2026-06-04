@@ -151,6 +151,13 @@ class Winding3DPanel(QWidget):
         self._fps = 0.0
         self._highlighted_layer: int = -1  # -1 = no highlight
 
+        # Dijital ikiz: canlı kafa + mandrel dönüşü için durum
+        self._live_x_mm: float = 0.0
+        self._live_y_mm: float = 0.0
+        self._live_a_deg: float = 0.0
+        self._head_item: Optional[gl.GLScatterPlotItem] = None
+        self._mandrel_a0: float = 0.0   # mandrel başlangıç açısı (radyan)
+
         self._build_ui()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(int(1000 / self.REFRESH_HZ))
@@ -408,6 +415,11 @@ class Winding3DPanel(QWidget):
             idx = int(self._current_progress * (len(self._fiber_path_full) - 1))
             self._marker_item.setData(pos=self._fiber_path_full[idx:idx + 1])
 
+        # Dijital ikiz kafa + mandrel dönüşü (live_x/a set edilmişse)
+        if self._live_x_mm != 0.0 or self._live_a_deg != 0.0:
+            self._update_head_item(self._live_x_mm, self._live_y_mm,
+                                   self._live_a_deg)
+
         import time as _t
         self._fps_frames += 1
         elapsed = _t.monotonic() - self._fps_t0
@@ -416,6 +428,68 @@ class Winding3DPanel(QWidget):
             self._fps_lbl.setText(f"3D: {self._fps:.1f} FPS")
             self._fps_frames = 0
             self._fps_t0 = _t.monotonic()
+
+    @Slot(float, float, float, float)
+    def on_live_koordinat(self, x_mm: float, y_mm: float,
+                          _z_deg: float, a_deg: float) -> None:
+        """
+        Dijital ikiz: motor'dan gelen anlık (X, Y, Z, A) koordinatı al.
+
+        X_mm  — taşıyıcı eksenel konum  (mandrel uzunluğu boyunca)
+        Y_mm  — radyal kafa mesafesi     (mandrel yüzeyine göre)
+        _z_deg — kafa yönlendirme açısı  (3D gösterimde şimdilik kullanılmıyor)
+        A_deg — iş mili kümülatif açı    (mandrel dönüşü için)
+
+        Bu slot @50 Hz çağrılır; _refresh_view() zaten @30 Hz GL'yi yeniler,
+        sadece durum güncellenir — ekstra GL çizim yükü yoktur.
+        """
+        self._live_x_mm = float(x_mm)
+        self._live_y_mm = float(y_mm)
+        self._live_a_deg = float(a_deg)
+
+        # İlerleme belirtecini fiber yolunda da ilerlet
+        if self._params is not None and self._params.mandrel_L_mm > 0:
+            x_frac = max(0.0, min(1.0, x_mm / self._params.mandrel_L_mm))
+            n_layers_done = int(a_deg / 360) % max(self._params.n_layers, 1)
+            self._current_progress = max(0.0, min(1.0,
+                (n_layers_done + x_frac) / max(self._params.n_layers, 1)))
+
+    def _update_head_item(self, x_mm: float, y_mm: float, a_deg: float) -> None:
+        """Sarım kafası (kırmızı top) + mandrel dönüşünü GL'de güncelle."""
+        if not self._params:
+            return
+        R = self._params.mandrel_R_mm / 1000.0
+        L = self._params.mandrel_L_mm / 1000.0
+
+        # Sarım kafası (eye) konumu — mandrel yüzeyi + Y radyal mesafe
+        r_head = R + max(0.0, y_mm) / 1000.0
+        # A açısı iş milinin kümülatif dönüşü: kafanın yüzeydeki açısal konumu
+        theta = math.radians(a_deg % 360)
+        hx = r_head * math.cos(theta)
+        hy = r_head * math.sin(theta)
+        # X → eksenel; merkeze göre ofset
+        hz = x_mm / 1000.0 - L / 2.0
+
+        if self._head_item is None:
+            self._head_item = gl.GLScatterPlotItem(
+                pos=np.array([[hx, hy, hz]]),
+                color=(1.0, 0.2, 0.2, 1.0),
+                size=14.0)
+            self._gl.addItem(self._head_item)
+        else:
+            self._head_item.setData(pos=np.array([[hx, hy, hz]]))
+
+        # Mandrel dönüşü: mesh item'i A ekseni etrafında döndür
+        if self._mesh_item is not None:
+            try:
+                from pyqtgraph.Qt import QtGui
+                rot = -float(a_deg % 360)   # işaret: mandrel CW döner
+                tr = self._mesh_item.transform()
+                tr.setToIdentity()
+                tr.rotate(rot, 0, 0, 1)   # Z ekseni = mandrel ekseni
+                self._mesh_item.setTransform(tr)
+            except Exception:
+                pass
 
     @Slot(int)
     def highlight_layer(self, layer_idx: int):

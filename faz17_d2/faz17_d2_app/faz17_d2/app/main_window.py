@@ -8,7 +8,7 @@ Orchestrates:
   - Async-safe shutdown
 """
 from __future__ import annotations
-import queue, sys, os, threading
+import math, queue, sys, os, threading
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSettings, QTimer, Slot
@@ -44,6 +44,7 @@ from app.panels.tabaka_yoneticisi import TabakaYoneticisiPanel
 from app.panels.katman_dizilim_paneli import KatmanDizilimPaneli
 from app.panels.uretim_tasarim_paneli import UretimTasarimPaneli
 from app.link_factory import LinkConfig, make_link
+from app.engine.production_engine import ProductionEngine, ProductionState
 
 
 class FilamentWindingApp(QMainWindow):
@@ -99,6 +100,9 @@ class FilamentWindingApp(QMainWindow):
         # Worker
         self._worker = TelemetryWorker(
             self._link, self._stream, self._safety, self._motion, self._twin)
+
+        # Üretim motoru (G-kodu yorumlayıcı + dijital ikiz köprüsü)
+        self._engine = ProductionEngine(self)
 
         # UI
         self._build_ui()
@@ -316,6 +320,34 @@ class FilamentWindingApp(QMainWindow):
         # Recipe → 3D viz update
         self._panel_recipe.recipeLoaded.connect(self._on_recipe_loaded)
 
+        # ── Üretim motoru (Fas 8) ─────────────────────────────────────────────
+        eng = self._engine
+
+        # Motor → 3D dijital ikiz (50 Hz koordinat akışı)
+        eng.koordinatGuncellendi.connect(self._panel_3d.on_live_koordinat)
+
+        # Motor → canlı üretim durumu/ilerleme
+        eng.durumGuncellendi.connect(self._panel_live.on_production_status)
+        eng.durumAdiDegisti.connect(self._panel_live.on_production_state)
+
+        # Motor → 1 Hz telemetri → kart güncelleme + DB kaydı
+        eng.telemetriUretildi.connect(self._panel_live.on_latest_frame)
+        eng.telemetriUretildi.connect(self._on_engine_telemetri)
+
+        # Motor → sınır ihlali → SafetyEvent(CRIT) + ACİL DURDUR
+        eng.sinirIhlali.connect(self._on_engine_sinir_ihlali)
+
+        # Canlı Üretim butonları → motor kontrol
+        lp = self._panel_live
+        lp.sarmaBaslat.connect(self._on_sarma_basla)
+        lp.sarmaDuraklat.connect(eng.duraklat)
+        lp.sarmaDevam.connect(eng.devam)
+        lp.sarmaAcilDur.connect(self._on_sarma_acil_dur)
+        lp.sarmaSifirla.connect(eng.sifirla)
+
+        # Real modda ESP32 telemetrisi → dijital ikiz koordinat besleme
+        self._worker.latestFrame.connect(eng.gercek_telemetri)
+
         # PM bridge: feed sample data periodically
         self._pm_timer = QTimer(self)
         self._pm_timer.setInterval(1000)   # 1Hz
@@ -482,6 +514,93 @@ class FilamentWindingApp(QMainWindow):
         """Mandrel geometrisi değiştiğinde tüm tasarım panellerini güncelle."""
         self._panel_katman.set_mandrel_parameters(D_mm, L_mm, P_MPa)
         self._panel_uretim.set_mandrel_parameters(D_mm, L_mm, P_MPa)
+        # Motoru yeni mandrel boyutuyla güncelle
+        self._engine.set_geometry(D_mm)
+        self._engine.set_limits(-5.0, D_mm * math.pi * 1.5)
+
+    @Slot()
+    def _on_sarma_basla(self) -> None:
+        """Canlı Üretim 'Sarmayı Başlat' → G-kodu motora yükle + başlat."""
+        try:
+            gcode = self._panel_uretim.get_gcode()
+        except Exception as exc:
+            self.statusBar().showMessage(
+                f"G-kodu alınamadı ({exc}); sarma başlatılamadı.", 6000)
+            return
+        if not gcode or gcode.isspace():
+            self.statusBar().showMessage(
+                "G-kodu boş — önce 'Üretim Tasarım Merkezi' sekmesinde "
+                "katman yığını oluşturun.", 7000)
+            return
+        try:
+            prof = self._panel_uretim.get_machine_profile()
+            axis_names = {
+                "x": prof.x_eksen,
+                "y": prof.y_eksen,
+                "z": prof.z_eksen,
+                "a": prof.a_eksen,
+            }
+        except Exception:
+            axis_names = None
+
+        D_mm = self._panel_tabaka._cap.value()
+        is_real = (self._link_config.kind == "real")
+        self._engine.set_geometry(D_mm)
+        self._engine.set_limits(-5.0, prof.x_baslangic_mm + prof.max_x_strok_mm
+                                if prof else 395.0)
+        self._engine.set_real_mode(is_real)
+
+        n = self._engine.gcode_yukle(gcode, axis_names=axis_names,
+                                     diameter_mm=D_mm)
+        self.statusBar().showMessage(
+            f"G-kodu yüklendi: {n} hareket, "
+            f"tahmini süre {self._engine.total_time_s:.0f}s.", 5000)
+
+        # Üretim DB oturumu başlat
+        if not self._recording:
+            import time as _t
+            sid = f"S_sarma_{int(_t.time())}"
+            if self._telem_db.start_session(sid):
+                self._recording = True
+                if hasattr(self, "_record_act"):
+                    self._record_act.setChecked(True)
+
+        self._engine.basla()
+        self._panel_live.set_running_status(True)
+
+    @Slot()
+    def _on_sarma_acil_dur(self) -> None:
+        """Canlı üretim ACİL DURDUR — motor + donanım E-STOP."""
+        self._engine.acilDur()
+        self._on_estop()   # donanım ESTOP zinciri
+
+    @Slot(object)
+    def _on_engine_telemetri(self, frame) -> None:
+        """Motor 1 Hz telemetri → telemetry.db sessiz kaydı."""
+        if self._recording:
+            try:
+                self._telem_db.record(frame)
+            except Exception:
+                pass
+
+    @Slot(str, str, float, float)
+    def _on_engine_sinir_ihlali(self, code: str, msg: str,
+                                value: float, threshold: float) -> None:
+        """Motor sınır ihlali → SafetyEvent(CRIT) + alarmlar + E-STOP."""
+        import time as _t
+        from backend.core.safety_controller import SafetyEvent, SafetyLevel
+        ev = SafetyEvent(
+            level=SafetyLevel.CRIT,
+            code=code,
+            msg=f"[Motor] {msg}",
+            value=float(value),
+            threshold=float(threshold),
+            timestamp=_t.time(),
+        )
+        self._panel_alarms.on_safety_event(ev)
+        self._panel_live.set_safety_status("crit")
+        # Donanım ESTOP zincirini de tetikle
+        self._on_estop()
 
     @Slot()
     def _on_new_session(self):

@@ -1783,6 +1783,15 @@ Mandrel: D={D_mm:.0f}×L={L_mm:.0f} mm
         self._material_key = key
         self._schedule_analysis()
 
+    def get_gcode(self) -> str:
+        """Mevcut G-kodu tam metnini döndür (motor yükleme için)."""
+        self._export_fmt.setCurrentIndex(0)   # G-code formatı
+        return self._gen_gcode(_preview=False)
+
+    def get_machine_profile(self):
+        """Aktif MachineProfile nesnesini döndür."""
+        return self._get_active_profile()
+
     def apply_project(self, proje: Dict[str, Any]) -> None:
         m = proje.get("mandrel", {})
         self._mandrel = {
