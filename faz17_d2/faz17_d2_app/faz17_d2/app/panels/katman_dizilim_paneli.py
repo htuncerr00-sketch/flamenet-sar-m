@@ -426,6 +426,13 @@ class KatmanDizilimPaneli(QWidget):
         self._debounce_timer.setInterval(self._DEBOUNCE_MS)
         self._debounce_timer.timeout.connect(self._recalculate)
 
+        # Otomatik reçete köprüsü: tablo değişince (debounce sonrası) yığını
+        # Üretim Tasarım Merkezi + CAM motoruna sessizce fırlat.
+        self._autosend_timer = QTimer(self)
+        self._autosend_timer.setSingleShot(True)
+        self._autosend_timer.setInterval(self._DEBOUNCE_MS)
+        self._autosend_timer.timeout.connect(self._emit_uretime_auto)
+
         self._build_ui()
         self._refresh_table()
         self._update_stats_blank()
@@ -937,6 +944,7 @@ class KatmanDizilimPaneli(QWidget):
                 self._table.removeRow(row)
                 self._lbl_layer_count.setText(f"{self._table.rowCount()} katman")
                 self._set_status(f"Satır {row + 1} silindi.")
+                self._schedule_autosend()
             return
         if row >= len(self._stack):
             return
@@ -967,6 +975,7 @@ class KatmanDizilimPaneli(QWidget):
                 self._table.setRowCount(0)
                 self._lbl_layer_count.setText("0 katman")
                 self._set_status("Tablo temizlendi.")
+                self._schedule_autosend()
             return
         if len(self._stack) == 0:
             return
@@ -988,7 +997,13 @@ class KatmanDizilimPaneli(QWidget):
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         """Tablo hücresi düzenlendiğinde backend LayerSpec'i güncelle."""
-        if self._suppress_cell_signal or not self._backend_ok:
+        if self._suppress_cell_signal:
+            return
+
+        if not self._backend_ok:
+            # Backend yok: hücre değeri tabloda zaten duruyor; sadece
+            # otomatik köprüyü tetikle (kullanıcı değeri elle düzenledi).
+            self._schedule_autosend()
             return
 
         row = item.row()
@@ -1280,6 +1295,8 @@ class KatmanDizilimPaneli(QWidget):
         idx = type_combo.findData(layer_type)
         if idx >= 0:
             type_combo.setCurrentIndex(idx)
+        type_combo.currentIndexChanged.connect(
+            lambda _i: self._schedule_autosend())
         self._table.setCellWidget(row, COL_TYPE, type_combo)
 
         for col, val, fmt in [
@@ -1305,6 +1322,8 @@ class KatmanDizilimPaneli(QWidget):
         sidx = strat_combo.findData(strategy)
         if sidx >= 0:
             strat_combo.setCurrentIndex(sidx)
+        strat_combo.currentIndexChanged.connect(
+            lambda _i: self._schedule_autosend())
         self._table.setCellWidget(row, COL_STRATEGY, strat_combo)
 
         self._set_status_widget(row, "gray", "—")
@@ -1314,6 +1333,7 @@ class KatmanDizilimPaneli(QWidget):
             f"{self._LAYER_TYPE_LABELS.get(layer_type, layer_type)} "
             f"eklendi (α = {alpha_deg:+.1f}°)"
         )
+        self._schedule_autosend()
 
     def _get_stack_as_dict(self) -> dict:
         """Mevcut katman yığınını dict formatında döndür (backend veya UI)."""
@@ -1387,6 +1407,20 @@ class KatmanDizilimPaneli(QWidget):
         self.uretimeGonder.emit(stack_dict)
         self._set_status(f"{n} katman Üretim Merkezi ve CAM'a gönderildi.")
 
+    def _schedule_autosend(self) -> None:
+        """Tablo mutasyonu sonrası otomatik gönderim için debounce başlat."""
+        self._autosend_timer.start(self._DEBOUNCE_MS)
+
+    @Slot()
+    def _emit_uretime_auto(self) -> None:
+        """Debounce sonrası: mevcut yığını sessizce üretim + CAM'a fırlat."""
+        n = self._table.rowCount() if not self._backend_ok else (
+            len(self._stack) if self._stack else 0
+        )
+        if n == 0:
+            return
+        self.uretimeGonder.emit(self._get_stack_as_dict())
+
     def _update_stats_blank(self) -> None:
         """Yığın boş veya hesap yok — sağ paneli sıfırla."""
         self._lbl_burst.setText("—")
@@ -1416,6 +1450,8 @@ class KatmanDizilimPaneli(QWidget):
         """katmanDegisti sinyalini fırlat (CAM ve 3D paneller dinler)."""
         if self._backend_ok:
             self.katmanDegisti.emit(self._stack)
+        # Her iki modda da CAM motoruna otomatik köprü
+        self._schedule_autosend()
 
     # ════════════════════════════════════════════════════════════════════════
     # Harici API (proje yöneticisi ve diğer paneller için)

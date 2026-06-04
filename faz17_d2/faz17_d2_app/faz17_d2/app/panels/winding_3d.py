@@ -137,12 +137,21 @@ def path_to_3d(z_mm_profile: np.ndarray, r_mm_profile: np.ndarray,
 
 class _TrackballGLView(gl.GLViewWidget):
     """
-    GLViewWidget alt sınıfı — fare hareketleri sonrası spinbox'ları senkronize eder.
-    Sol-sürükle: orbit, Tekerlek: yakınlaştır/uzaklaştır (smooth exponential).
+    GLViewWidget alt sınıfı — SolidWorks tarzı serbest 3-eksen orbit (trackball).
+
+    pyqtgraph'ın varsayılan 'euler' modu yükseklik açısını [-90, +90] aralığına
+    KISITLAR; parça asla "altına/üstüne fırıl fırıl" dönemez. Bu yüzden
+    'quaternion' rotasyon modu kullanılır: kuaterniyon çarpımı kümülatiftir,
+    hiçbir eksende kilit yoktur — kamera her yöne serbestçe yuvarlanabilir.
+
+    - Sol-sürükle  → serbest orbit (quaternion)
+    - Tekerlek     → yumuşak zoom (üstel)
+    - Fare hareketi/tekerlek sonrası spinbox'lar kuaterniyondan senkronize edilir
     """
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        # rotationMethod='quaternion' → yükseklik kısıtı YOK, serbest trackball
+        super().__init__(parent, rotationMethod='quaternion')
         self._sync_cb = None   # callable: no args
 
     def set_sync_callback(self, cb) -> None:
@@ -167,11 +176,28 @@ class _TrackballGLView(gl.GLViewWidget):
         delta = ev.angleDelta().y()
         if delta == 0:
             delta = ev.angleDelta().x()
-        # Smoother zoom: softer exponent than pyqtgraph default
+        # Yumuşak zoom: pyqtgraph varsayılanından daha hafif üstel katsayı
         factor = 0.999 ** (delta * 0.4)
         self.opts['distance'] = max(0.001, self.opts.get('distance', 0.7) * factor)
         self.update()
         self._call_sync()
+
+    def read_azim_elev(self) -> Tuple[float, float]:
+        """
+        Mevcut kuaterniyon rotasyonundan yaklaşık (azimuth, elevation) çıkar.
+        setCameraPosition'ın ters dönüşümü: az = -eu.z()-90, elev = eu.x()+90.
+        """
+        try:
+            rot = self.opts.get('rotation', None)
+            if rot is None:
+                return float(self.opts.get('azimuth', 45.0)), \
+                       float(self.opts.get('elevation', 25.0))
+            eu = rot.toEulerAngles()
+            azim = -eu.z() - 90.0
+            elev = eu.x() + 90.0
+            return float(azim), float(elev)
+        except Exception:
+            return 45.0, 25.0
 
 
 class Winding3DPanel(QWidget):
@@ -223,7 +249,7 @@ class Winding3DPanel(QWidget):
         h_split = QHBoxLayout()
         self._gl = _TrackballGLView()
         self._gl.setBackgroundColor(COLOR["bg_window"])
-        self._gl.setCameraPosition(distance=0.7, elevation=25, azimuth=45)
+        self._apply_camera_angles(0.7, 25.0, 45.0)
         self._gl.set_sync_callback(self._sync_camera_spinboxes)
         self._gl_axes = gl.GLAxisItem(size=pg.Vector(0.05, 0.05, 0.05))
         self._gl.addItem(self._gl_axes)
@@ -430,18 +456,43 @@ class Winding3DPanel(QWidget):
                        self._params.mandrel_L_mm * 0.002)
         return 0.5   # ~500 mm varsayılan mandrel
 
+    def _apply_camera_angles(self, distance: float,
+                             elevation: float, azimuth: float) -> None:
+        """
+        Quaternion modunda mutlak kamera yönünü ayarla.
+
+        pyqtgraph'ın setCameraPosition(elevation=, azimuth=) yolu quaternion
+        modunda PySide6'da `fromEulerAngles(QVector3D)` çağırır ve bu binding
+        hatalıdır. Bunun yerine 3-float overload'u ile kuaterniyonu doğrudan
+        kurarız (pyqtgraph'ın kendi konvansiyonuyla birebir aynı):
+            eu.x = elevation - 90,  eu.y = 0,  eu.z = -azimuth - 90
+        """
+        from pyqtgraph.Qt import QtGui
+        self._gl.opts['distance'] = max(0.001, float(distance))
+        q = QtGui.QQuaternion.fromEulerAngles(
+            float(elevation) - 90.0, 0.0, -float(azimuth) - 90.0)
+        self._gl.opts['rotation'] = q
+        self._gl.update()
+
     def _update_camera(self, *args):
         base = self._base_distance()
         dist = base * (self._dist_spin.value() / 50.0)
-        self._gl.setCameraPosition(
-            distance=max(0.001, dist),
-            elevation=self._elev_spin.value(),
-            azimuth=self._azim_spin.value())
+        self._apply_camera_angles(dist,
+                                  self._elev_spin.value(),
+                                  self._azim_spin.value())
 
     def _sync_camera_spinboxes(self) -> None:
-        """Fare hareketi / tekerlek sonrası spinbox değerlerini GL kamerasıyla senkronize et."""
-        e = int(round(float(self._gl.opts.get('elevation', 25.0))))
-        a = int(round(float(self._gl.opts.get('azimuth', 45.0))))
+        """Fare hareketi / tekerlek sonrası spinbox değerlerini GL kamerasıyla senkronize et.
+
+        Quaternion modunda azimuth/elevation 'opts' içinde güncellenmez; bu yüzden
+        değerler kuaterniyon rotasyonundan geri-hesaplanır.
+        """
+        azim, elev = self._gl.read_azim_elev()
+        # [-180, 180] aralığına normalize et (serbest orbit'te değerler taşabilir)
+        azim = ((azim + 180.0) % 360.0) - 180.0
+        elev = ((elev + 180.0) % 360.0) - 180.0
+        e = int(round(elev))
+        a = int(round(azim))
         raw_d = float(self._gl.opts.get('distance', 0.7))
         base = self._base_distance()
         pct = int(round(raw_d / max(base, 1e-6) * 50.0))
