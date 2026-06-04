@@ -157,6 +157,24 @@ _VALUE_STYLE = (
     "font-size: 13px; padding: 2px;"
 ).format(fg=COLOR["text_primary"])
 
+_BTN_SEND = (
+    "QPushButton {{"
+    "  background: #1a3a5a;"
+    "  color: {fg};"
+    "  padding: 8px 10px;"
+    "  border: 1px solid #2a5a8a;"
+    "  border-radius: 3px;"
+    "  font-weight: bold;"
+    "}}"
+    "QPushButton:hover {{ background: #2a4a6a; }}"
+    "QPushButton:pressed {{ background: #0a2a4a; }}"
+    "QPushButton:disabled {{ color: {dt}; background: {bgw}; }}"
+).format(
+    fg=COLOR["accent_bright"],
+    dt=COLOR["text_disabled"],
+    bgw=COLOR["bg_panel"],
+)
+
 
 # Tablo sütun indeksleri (her yerde kullanılır)
 COL_ID         = 0
@@ -363,9 +381,17 @@ class KatmanDizilimPaneli(QWidget):
     katmanDegisti  = Signal(object)   # LayerStack
     katmanSecildi  = Signal(int)      # satır indeksi
     kaymaUyarisi   = Signal(int, float)  # (layer_idx, slip_ratio)
+    uretimeGonder  = Signal(dict)     # Manuel dizilim → üretim / CAM
 
     # ── Sabitler ─────────────────────────────────────────────────────────────
     _DEBOUNCE_MS = 200
+
+    _LAYER_TYPE_LABELS: Dict[str, str] = {
+        "helical": "Sarmal Helisel",
+        "hoop":    "Çevre (Hoop)",
+        "polar":   "Kutupsal",
+        "skin":    "Bitiş Sarımı",
+    }
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -387,6 +413,9 @@ class KatmanDizilimPaneli(QWidget):
         self._worker: Optional[_AnalysisWorker] = None
         self._pending_recalc = False
         self._last_validations: List[Dict[str, Any]] = []
+
+        # Backend yokken saf-UI katman listesi
+        self._ui_layers: List[Dict[str, Any]] = []
 
         # Tablo programatik güncelleme sırasında sinyal çakışmasını engelle
         self._suppress_cell_signal = False
@@ -439,7 +468,7 @@ class KatmanDizilimPaneli(QWidget):
         )
         v.addWidget(title)
 
-        # Ekleme butonları
+        # Ekleme butonları — her zaman aktif (backend yokken UI-only satır ekler)
         for label, slot, tooltip in [
             ("+ Helisel Ekle",      self._on_add_helical,
              "Sarmal katman (±α). Genelde 45-65° aralığında."),
@@ -454,7 +483,6 @@ class KatmanDizilimPaneli(QWidget):
             btn.setToolTip(tooltip)
             btn.setStyleSheet(_BTN_PRIMARY)
             btn.clicked.connect(slot)
-            btn.setEnabled(self._backend_ok)
             v.addWidget(btn)
 
         # Ayraç
@@ -481,14 +509,12 @@ class KatmanDizilimPaneli(QWidget):
             btn.setToolTip(tooltip)
             btn.setStyleSheet(_BTN_SECONDARY)
             btn.clicked.connect(slot)
-            btn.setEnabled(self._backend_ok)
             v.addWidget(btn)
 
         btn_del = QPushButton("✕ Sil")
         btn_del.setToolTip("Seçili katmanı sil")
         btn_del.setStyleSheet(_BTN_DANGER)
         btn_del.clicked.connect(self._on_delete)
-        btn_del.setEnabled(self._backend_ok)
         v.addWidget(btn_del)
 
         v.addSpacing(8)
@@ -497,10 +523,18 @@ class KatmanDizilimPaneli(QWidget):
         btn_clear.setToolTip("Tüm katmanları sil")
         btn_clear.setStyleSheet(_BTN_DANGER)
         btn_clear.clicked.connect(self._on_clear_all)
-        btn_clear.setEnabled(self._backend_ok)
         v.addWidget(btn_clear)
 
         v.addStretch()
+
+        # Üretim merkezine gönder
+        btn_gonder = QPushButton("→ Üretime Gönder")
+        btn_gonder.setToolTip(
+            "Mevcut katman yığınını Üretim Tasarım Merkezi ve CAM Üretici'ye gönder"
+        )
+        btn_gonder.setStyleSheet(_BTN_SEND)
+        btn_gonder.clicked.connect(self._on_gonder_uretim)
+        v.addWidget(btn_gonder)
 
         # Mandrel özet kutusu (alt bilgi)
         grp = QGroupBox("Mandrel")
@@ -800,6 +834,7 @@ class KatmanDizilimPaneli(QWidget):
 
     def _on_add_helical(self) -> None:
         if not self._backend_ok:
+            self._insert_raw_row("helical", alpha_deg=45.0)
             return
         spec = self._stack.make_helical(
             alpha_deg=45.0, fitil_genisligi_mm=6.0, cakisma_pct=5.0,
@@ -829,6 +864,7 @@ class KatmanDizilimPaneli(QWidget):
 
     def _on_add_hoop(self) -> None:
         if not self._backend_ok:
+            self._insert_raw_row("hoop", alpha_deg=89.5, feed=60.0)
             return
         spec = self._stack.make_hoop()
         self._stack.add_layer(spec)
@@ -839,6 +875,7 @@ class KatmanDizilimPaneli(QWidget):
 
     def _on_add_polar(self) -> None:
         if not self._backend_ok:
+            self._insert_raw_row("polar", alpha_deg=12.0)
             return
         spec = self._stack.make_polar()
         self._stack.add_layer(spec)
@@ -849,6 +886,7 @@ class KatmanDizilimPaneli(QWidget):
 
     def _on_add_skin(self) -> None:
         if not self._backend_ok:
+            self._insert_raw_row("skin", alpha_deg=89.5, feed=60.0)
             return
         spec = self._stack.make_skin()
         self._stack.add_layer(spec)
@@ -859,6 +897,7 @@ class KatmanDizilimPaneli(QWidget):
 
     def _on_move_up(self) -> None:
         if not self._backend_ok:
+            self._set_status("Yeniden sıralama için backend gerekli.")
             return
         row = self._table.currentRow()
         if row <= 0:
@@ -871,6 +910,7 @@ class KatmanDizilimPaneli(QWidget):
 
     def _on_move_down(self) -> None:
         if not self._backend_ok:
+            self._set_status("Yeniden sıralama için backend gerekli.")
             return
         row = self._table.currentRow()
         if row < 0 or row >= len(self._stack) - 1:
@@ -882,10 +922,23 @@ class KatmanDizilimPaneli(QWidget):
         self._emit_stack_changed()
 
     def _on_delete(self) -> None:
-        if not self._backend_ok:
-            return
         row = self._table.currentRow()
-        if row < 0 or row >= len(self._stack):
+        if row < 0:
+            return
+        if not self._backend_ok:
+            reply = QMessageBox.question(
+                self, "Katman Sil",
+                f"Satır {row + 1} silinsin mi?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                if row < len(self._ui_layers):
+                    self._ui_layers.pop(row)
+                self._table.removeRow(row)
+                self._lbl_layer_count.setText(f"{self._table.rowCount()} katman")
+                self._set_status(f"Satır {row + 1} silindi.")
+            return
+        if row >= len(self._stack):
             return
         L = self._stack[row]
         reply = QMessageBox.question(
@@ -901,7 +954,21 @@ class KatmanDizilimPaneli(QWidget):
             self._set_status(f"Katman silindi: {L.label}")
 
     def _on_clear_all(self) -> None:
-        if not self._backend_ok or len(self._stack) == 0:
+        if not self._backend_ok:
+            if self._table.rowCount() == 0:
+                return
+            reply = QMessageBox.question(
+                self, "Tümünü Temizle",
+                f"Tablodaki {self._table.rowCount()} satırın tamamı silinsin mi?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self._ui_layers.clear()
+                self._table.setRowCount(0)
+                self._lbl_layer_count.setText("0 katman")
+                self._set_status("Tablo temizlendi.")
+            return
+        if len(self._stack) == 0:
             return
         reply = QMessageBox.question(
             self, "Tümünü Temizle",
@@ -1159,6 +1226,166 @@ class KatmanDizilimPaneli(QWidget):
             self._apply_row_color(i, color)
 
         self._suppress_cell_signal = False
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Backend-bağımsız tablo yardımcıları
+    # ════════════════════════════════════════════════════════════════════════
+
+    def _insert_raw_row(self,
+                        layer_type: str,
+                        alpha_deg: float = 45.0,
+                        tow_w: float = 6.0,
+                        overlap: float = 5.0,
+                        feed: float = 80.0,
+                        rpm: float = 60.0,
+                        friction: float = 0.30,
+                        strategy: str = "geodesic") -> None:
+        """Backend yokken doğrudan tabloya varsayılan değerlerle satır ekle."""
+        row_id = self._table.rowCount()
+        d: Dict[str, Any] = {
+            "id": row_id, "type": layer_type, "layer_type": layer_type,
+            "alpha_deg": alpha_deg,
+            "fitil_genisligi_mm": tow_w,
+            "cakisma_pct": overlap,
+            "thickness_mm": 0.30,
+            "feed_mm_s": feed,
+            "spindle_rpm": rpm,
+            "friction_mu": friction,
+            "strategy": strategy,
+            "label": (
+                f"{self._LAYER_TYPE_LABELS.get(layer_type, layer_type)} "
+                f"{alpha_deg:+.1f}°"
+            ),
+            "notes": "Manuel UI girişi",
+        }
+        self._ui_layers.append(d)
+
+        self._suppress_cell_signal = True
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+
+        id_item = QTableWidgetItem(str(row_id))
+        id_item.setTextAlignment(Qt.AlignCenter)
+        id_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        id_item.setForeground(QBrush(QColor(COLOR["text_secondary"])))
+        self._table.setItem(row, COL_ID, id_item)
+
+        type_combo = QComboBox()
+        type_combo.setStyleSheet(
+            f"QComboBox {{ background: {COLOR['bg_widget']}; "
+            f"color: {COLOR['text_primary']}; border: 1px solid {COLOR['border']}; }}"
+        )
+        for key, lbl in self._LAYER_TYPE_LABELS.items():
+            type_combo.addItem(lbl, key)
+        idx = type_combo.findData(layer_type)
+        if idx >= 0:
+            type_combo.setCurrentIndex(idx)
+        self._table.setCellWidget(row, COL_TYPE, type_combo)
+
+        for col, val, fmt in [
+            (COL_ALPHA,    alpha_deg, "{:+.1f}"),
+            (COL_WIDTH,    tow_w,     "{:.2f}"),
+            (COL_OVERLAP,  overlap,   "{:.1f}"),
+            (COL_FEED,     feed,      "{:.1f}"),
+            (COL_RPM,      rpm,       "{:.1f}"),
+            (COL_FRICTION, friction,  "{:.2f}"),
+        ]:
+            it = QTableWidgetItem(fmt.format(val))
+            it.setTextAlignment(Qt.AlignCenter)
+            it.setForeground(QBrush(QColor(COLOR["text_primary"])))
+            self._table.setItem(row, col, it)
+
+        strat_combo = QComboBox()
+        strat_combo.setStyleSheet(
+            f"QComboBox {{ background: {COLOR['bg_widget']}; "
+            f"color: {COLOR['text_primary']}; border: 1px solid {COLOR['border']}; }}"
+        )
+        strat_combo.addItem("Jeodezik",     "geodesic")
+        strat_combo.addItem("Non-Jeodezik", "non_geodesic")
+        sidx = strat_combo.findData(strategy)
+        if sidx >= 0:
+            strat_combo.setCurrentIndex(sidx)
+        self._table.setCellWidget(row, COL_STRATEGY, strat_combo)
+
+        self._set_status_widget(row, "gray", "—")
+        self._suppress_cell_signal = False
+        self._lbl_layer_count.setText(f"{self._table.rowCount()} katman")
+        self._set_status(
+            f"{self._LAYER_TYPE_LABELS.get(layer_type, layer_type)} "
+            f"eklendi (α = {alpha_deg:+.1f}°)"
+        )
+
+    def _get_stack_as_dict(self) -> dict:
+        """Mevcut katman yığınını dict formatında döndür (backend veya UI)."""
+        if self._backend_ok and self._stack is not None:
+            d = self._stack.to_dict()
+            # Geriye dönük uyumluluk: her katmanda hem 'type' hem 'layer_type'
+            for layer in d.get("layers", []):
+                if "type" in layer and "layer_type" not in layer:
+                    layer["layer_type"] = layer["type"]
+                if "layer_type" in layer and "type" not in layer:
+                    layer["type"] = layer["layer_type"]
+            return d
+
+        # Backend yok: tablodan oku
+        layers: List[Dict[str, Any]] = []
+        for row in range(self._table.rowCount()):
+            type_combo = self._table.cellWidget(row, COL_TYPE)
+            layer_type = type_combo.currentData() if type_combo else "helical"
+
+            def _cell_float(col: int, default: float = 0.0) -> float:
+                it = self._table.item(row, col)
+                if it is None:
+                    return default
+                try:
+                    return float(it.text().replace(",", "."))
+                except ValueError:
+                    return default
+
+            strat_combo = self._table.cellWidget(row, COL_STRATEGY)
+            strategy = strat_combo.currentData() if strat_combo else "geodesic"
+            alpha = _cell_float(COL_ALPHA, 45.0)
+
+            layers.append({
+                "id": row,
+                "type": layer_type,
+                "layer_type": layer_type,
+                "alpha_deg": alpha,
+                "fitil_genisligi_mm": _cell_float(COL_WIDTH, 6.0),
+                "cakisma_pct": _cell_float(COL_OVERLAP, 5.0),
+                "thickness_mm": 0.30,
+                "feed_mm_s": _cell_float(COL_FEED, 80.0),
+                "spindle_rpm": _cell_float(COL_RPM, 60.0),
+                "friction_mu": _cell_float(COL_FRICTION, 0.30),
+                "strategy": strategy,
+                "label": (
+                    f"{self._LAYER_TYPE_LABELS.get(layer_type, layer_type)} "
+                    f"{alpha:+.1f}°"
+                ),
+                "notes": "Manuel UI girişi",
+            })
+
+        return {
+            "versiyon": "1.0",
+            "default_friction_mu": 0.3,
+            "next_id": len(layers),
+            "layers": layers,
+        }
+
+    def _on_gonder_uretim(self) -> None:
+        """Mevcut katman yığınını Üretim Tasarım Merkezi ve CAM Üretici'ye gönder."""
+        n = self._table.rowCount() if not self._backend_ok else (
+            len(self._stack) if self._stack else 0
+        )
+        if n == 0:
+            QMessageBox.information(
+                self, "Bilgi",
+                "Göndermek için tabloya en az bir katman ekleyin.",
+            )
+            return
+        stack_dict = self._get_stack_as_dict()
+        self.uretimeGonder.emit(stack_dict)
+        self._set_status(f"{n} katman Üretim Merkezi ve CAM'a gönderildi.")
 
     def _update_stats_blank(self) -> None:
         """Yığın boş veya hesap yok — sağ paneli sıfırla."""

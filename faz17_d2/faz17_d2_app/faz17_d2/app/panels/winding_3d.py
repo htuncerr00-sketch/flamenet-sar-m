@@ -135,6 +135,45 @@ def path_to_3d(z_mm_profile: np.ndarray, r_mm_profile: np.ndarray,
     return np.array(pts_3d, dtype=np.float32) if pts_3d else np.zeros((1, 3), np.float32)
 
 
+class _TrackballGLView(gl.GLViewWidget):
+    """
+    GLViewWidget alt sınıfı — fare hareketleri sonrası spinbox'ları senkronize eder.
+    Sol-sürükle: orbit, Tekerlek: yakınlaştır/uzaklaştır (smooth exponential).
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._sync_cb = None   # callable: no args
+
+    def set_sync_callback(self, cb) -> None:
+        self._sync_cb = cb
+
+    def _call_sync(self) -> None:
+        if self._sync_cb is not None:
+            try:
+                self._sync_cb()
+            except Exception:
+                pass
+
+    def mouseReleaseEvent(self, ev):
+        super().mouseReleaseEvent(ev)
+        self._call_sync()
+
+    def mouseMoveEvent(self, ev):
+        super().mouseMoveEvent(ev)
+        self._call_sync()
+
+    def wheelEvent(self, ev):
+        delta = ev.angleDelta().y()
+        if delta == 0:
+            delta = ev.angleDelta().x()
+        # Smoother zoom: softer exponent than pyqtgraph default
+        factor = 0.999 ** (delta * 0.4)
+        self.opts['distance'] = max(0.001, self.opts.get('distance', 0.7) * factor)
+        self.update()
+        self._call_sync()
+
+
 class Winding3DPanel(QWidget):
     """3D mandrel + fiber yolu görüntüleyici."""
 
@@ -182,9 +221,10 @@ class Winding3DPanel(QWidget):
         layout.addLayout(header)
 
         h_split = QHBoxLayout()
-        self._gl = gl.GLViewWidget()
+        self._gl = _TrackballGLView()
         self._gl.setBackgroundColor(COLOR["bg_window"])
         self._gl.setCameraPosition(distance=0.7, elevation=25, azimuth=45)
+        self._gl.set_sync_callback(self._sync_camera_spinboxes)
         self._gl_axes = gl.GLAxisItem(size=pg.Vector(0.05, 0.05, 0.05))
         self._gl.addItem(self._gl_axes)
         h_split.addWidget(self._gl, stretch=4)
@@ -195,19 +235,19 @@ class Winding3DPanel(QWidget):
         row = 0
 
         ctrl_layout.addWidget(QLabel("Kamera uzaklığı:"), row, 0)
-        self._dist_spin = QSpinBox(); self._dist_spin.setRange(10, 200)
+        self._dist_spin = QSpinBox(); self._dist_spin.setRange(1, 500)
         self._dist_spin.setValue(70); self._dist_spin.setSuffix(" %")
         self._dist_spin.valueChanged.connect(self._update_camera)
         ctrl_layout.addWidget(self._dist_spin, row, 1); row += 1
 
         ctrl_layout.addWidget(QLabel("Yükseklik açısı:"), row, 0)
-        self._elev_spin = QSpinBox(); self._elev_spin.setRange(-89, 89)
+        self._elev_spin = QSpinBox(); self._elev_spin.setRange(-179, 179)
         self._elev_spin.setValue(25); self._elev_spin.setSuffix(" °")
         self._elev_spin.valueChanged.connect(self._update_camera)
         ctrl_layout.addWidget(self._elev_spin, row, 1); row += 1
 
         ctrl_layout.addWidget(QLabel("Yatay açı:"), row, 0)
-        self._azim_spin = QSpinBox(); self._azim_spin.setRange(0, 359)
+        self._azim_spin = QSpinBox(); self._azim_spin.setRange(-360, 360)
         self._azim_spin.setValue(45); self._azim_spin.setSuffix(" °")
         self._azim_spin.valueChanged.connect(self._update_camera)
         ctrl_layout.addWidget(self._azim_spin, row, 1); row += 1
@@ -234,7 +274,7 @@ class Winding3DPanel(QWidget):
         reset_btn.clicked.connect(self._reset_view)
         ctrl_layout.addWidget(reset_btn, row, 0, 1, 2); row += 1
 
-        info_lbl = QLabel("Sürükle: döndür\nSağ-sürükle: kaydır\nTekerlek: yakınlaştır")
+        info_lbl = QLabel("Sol-sürükle: döndür\nSağ-sürükle: kaydır\nTekerlek: yakınlaştır")
         info_lbl.setProperty("role", "caption")
         ctrl_layout.addWidget(info_lbl, row, 0, 1, 2); row += 1
 
@@ -383,15 +423,41 @@ class Winding3DPanel(QWidget):
         if self._marker_item is not None:
             self._marker_item.setVisible(self._show_progress.isChecked())
 
+    def _base_distance(self) -> float:
+        """Spinbox yüzde ölçeği için temel mesafe (mandrel parametresine veya sabite dayalı)."""
+        if self._params is not None:
+            return max(self._params.mandrel_R_mm * 0.003,
+                       self._params.mandrel_L_mm * 0.002)
+        return 0.5   # ~500 mm varsayılan mandrel
+
     def _update_camera(self, *args):
-        if self._params is None: return
-        base = max(self._params.mandrel_R_mm * 0.003,
-                   self._params.mandrel_L_mm * 0.002)
+        base = self._base_distance()
         dist = base * (self._dist_spin.value() / 50.0)
         self._gl.setCameraPosition(
-            distance=dist,
+            distance=max(0.001, dist),
             elevation=self._elev_spin.value(),
             azimuth=self._azim_spin.value())
+
+    def _sync_camera_spinboxes(self) -> None:
+        """Fare hareketi / tekerlek sonrası spinbox değerlerini GL kamerasıyla senkronize et."""
+        e = int(round(float(self._gl.opts.get('elevation', 25.0))))
+        a = int(round(float(self._gl.opts.get('azimuth', 45.0))))
+        raw_d = float(self._gl.opts.get('distance', 0.7))
+        base = self._base_distance()
+        pct = int(round(raw_d / max(base, 1e-6) * 50.0))
+        pct = max(1, min(500, pct))
+
+        for spin, val, lo, hi in [
+            (self._elev_spin, e,   -179, 179),
+            (self._azim_spin, a,   -360, 360),
+            (self._dist_spin, pct, 1,    500),
+        ]:
+            spin.blockSignals(True)
+            try:
+                spin.setValue(max(lo, min(hi, val)))
+            except Exception:
+                pass
+            spin.blockSignals(False)
 
     def _reset_view(self):
         self._dist_spin.setValue(70)

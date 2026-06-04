@@ -1763,9 +1763,14 @@ Mandrel: D={D_mm:.0f}×L={L_mm:.0f} mm
     # ── Dış API ───────────────────────────────────────────────────────────────
 
     def set_layer_stack(self, stack) -> None:
-        """LayerStack nesnesinden yükle (manual_layer_sequencer'dan)."""
+        """LayerStack veya dict'ten yükle (manual_layer_sequencer veya Manuel Dizilim'den)."""
         try:
-            self._stack_dict = stack.to_dict() if hasattr(stack, "to_dict") else {}
+            if isinstance(stack, dict):
+                self._stack_dict = stack
+            elif hasattr(stack, "to_dict"):
+                self._stack_dict = stack.to_dict()
+            else:
+                self._stack_dict = {}
         except Exception:
             self._stack_dict = {}
         self._schedule_analysis()

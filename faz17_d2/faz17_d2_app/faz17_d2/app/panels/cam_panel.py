@@ -36,7 +36,7 @@ def _make_backend():
 
 class _Worker(QObject):
     """Arka planda yol hesaplaması."""
-    finished = Signal(object, object)   # (WindingPath, GCodeProgram)
+    finished = Signal(object, object, object)  # (WindingPath, profile, all_layer_paths_or_None)
     error = Signal(str)
 
     def __init__(self, fn, *args):
@@ -61,6 +61,8 @@ class CAMPanel(QWidget):
         self._gcode_program = None
         self._stl_path: Optional[str] = None
         self._worker_thread: Optional[QThread] = None
+        self._stack_dict: Optional[dict] = None         # Manuel Dizilim katman yığını
+        self._all_layer_paths: Optional[list] = None    # [(layer_dict, WindingPath), ...]
         self._build_ui()
 
     # ── UI ──────────────────────────────────────────────────────────────────
@@ -148,6 +150,15 @@ class CAMPanel(QWidget):
 
         layout.addWidget(geo_box)
 
+        # ── Katman yığını bilgi çubuğu ───────────────────────────────────
+        self._stack_info_lbl = QLabel("Parametrik mod  (Manuel Dizilim'den yığın bekleniyor)")
+        self._stack_info_lbl.setStyleSheet(
+            f"color: {COLOR['text_secondary']}; padding: 4px 8px; "
+            f"background: {COLOR['bg_widget']}; border-radius: 3px; font-style: italic;"
+        )
+        self._stack_info_lbl.setWordWrap(True)
+        layout.addWidget(self._stack_info_lbl)
+
         # ── Sarma parametreleri ──────────────────────────────────────────
         wind_box = QGroupBox("Sarma Parametreleri")
         wind_grid = QGridLayout(wind_box)
@@ -158,11 +169,13 @@ class CAMPanel(QWidget):
         self._alpha = QDoubleSpinBox()
         self._alpha.setRange(1.0, 89.0); self._alpha.setValue(55.0)
         self._alpha.setSuffix(" °"); self._alpha.setDecimals(1)
+        self._alpha.setToolTip("Manuel Dizilim aktifken bu değer yok sayılır")
         wind_grid.addWidget(self._alpha, row, 1); row += 1
 
         wind_grid.addWidget(QLabel("Kat sayısı:"), row, 0)
         self._n_layers = QSpinBox()
         self._n_layers.setRange(1, 32); self._n_layers.setValue(4)
+        self._n_layers.setToolTip("Manuel Dizilim aktifken bu değer yok sayılır")
         wind_grid.addWidget(self._n_layers, row, 1); row += 1
 
         wind_grid.addWidget(QLabel("Fitil genişliği (mm):"), row, 0)
@@ -371,6 +384,7 @@ class CAMPanel(QWidget):
 
     def _do_calculate(self):
         MandrelProfile, WindingPathParams, generate_path, plan_motion, MachineConfig, generate_gcode = _make_backend()
+        import math as _math
 
         mtype = self._mandrel_type.currentText()
         r_mm = self._diameter.value() / 2.0
@@ -380,17 +394,49 @@ class CAMPanel(QWidget):
             profile = MandrelProfile.cylinder(l_mm, r_mm)
         elif mtype == "Konik":
             cone_deg = self._cone_angle.value()
-            import math
-            r_end = r_mm + l_mm * math.tan(math.radians(cone_deg))
+            r_end = r_mm + l_mm * _math.tan(_math.radians(cone_deg))
             profile = MandrelProfile.cone(l_mm, r_mm, r_end)
         elif mtype == "Kubbeli Silindir":
             profile = MandrelProfile.dome_cylinder_dome(l_mm, r_mm, self._dome_h.value())
         else:
             profile = MandrelProfile.from_stl(self._stl_path)
 
+        # ── Çok katmanlı mod (Manuel Dizilim'den yığın geldi) ────────────────
+        stack = self._stack_dict
+        if stack and stack.get("layers"):
+            all_layer_paths = []
+            for layer in stack["layers"]:
+                ltype = layer.get("layer_type") or layer.get("type", "helical")
+                if ltype == "hoop":
+                    strategy = "hoop"
+                elif ltype == "polar":
+                    strategy = "polar"
+                else:
+                    strategy = "helical"
+                pp = WindingPathParams(
+                    profile=profile,
+                    alpha_deg=float(layer.get("alpha_deg", 55.0)),
+                    n_layers=1,
+                    tow_width_mm=float(layer.get("fitil_genisligi_mm",
+                                                  self._tow_w.value())),
+                    overlap_pct=float(layer.get("cakisma_pct",
+                                                self._overlap.value())),
+                    feed_mm_s=float(layer.get("feed_mm_s", self._feed.value())),
+                    spindle_rpm=float(layer.get("spindle_rpm", self._rpm.value())),
+                    winding_strategy=strategy,
+                    carriage_min_mm=self._x_min.value(),
+                    carriage_max_mm=self._x_max.value(),
+                )
+                p = generate_path(pp)
+                all_layer_paths.append((layer, p))
+            first_path = all_layer_paths[0][1] if all_layer_paths else None
+            if first_path is None:
+                raise RuntimeError("Katman yığınından yol üretilemedi.")
+            return first_path, profile, all_layer_paths
+
+        # ── Tek-açı parametrik mod ───────────────────────────────────────────
         strategy_map = {"Sarmal": "helical", "Çevre": "hoop", "Kutupsal": "polar"}
         strategy = strategy_map.get(self._strategy.currentText(), "helical")
-
         path_params = WindingPathParams(
             profile=profile,
             alpha_deg=self._alpha.value(),
@@ -404,16 +450,21 @@ class CAMPanel(QWidget):
             carriage_max_mm=self._x_max.value(),
         )
         path = generate_path(path_params)
-        return path, profile
+        return path, profile, None
 
-    def _on_path_done(self, path, profile):
+    def _on_path_done(self, path, profile, all_layer_paths):
         self._winding_path = path
+        self._all_layer_paths = all_layer_paths
         self._calc_btn.setEnabled(True)
         self._progress_bar.setVisible(False)
         n = len(path.points)
+        n_layers_info = (
+            f"{len(all_layer_paths)} katman, "
+            if all_layer_paths else ""
+        )
         self._status_lbl.setText(
-            f"Yol hesaplandı: {n} nokta, {path.n_circuits} devre, "
-            f"{path.coverage_pct:.1f}% kapsama"
+            f"Yol hesaplandı: {n_layers_info}{n} nokta, "
+            f"{path.n_circuits} devre, {path.coverage_pct:.1f}% kapsama"
         )
         # 3D önizlemeyi güncelle
         try:
@@ -435,15 +486,70 @@ class CAMPanel(QWidget):
         try:
             _, _, _, plan_motion, MachineConfig, generate_gcode = _make_backend()
             ctrl_map = {"özel": "custom"}
-            ctrl = ctrl_map.get(self._ctrl_type.currentText(), self._ctrl_type.currentText())
+            ctrl = ctrl_map.get(self._ctrl_type.currentText(),
+                                self._ctrl_type.currentText())
             cfg = MachineConfig(
                 x_axis=self._x_axis_name.currentText(),
                 a_axis=self._a_axis_name.currentText(),
                 max_x_feed_mm_min=self._max_x_feed.value(),
                 controller_type=ctrl,
             )
-            segments = plan_motion(self._winding_path)
-            gp = generate_gcode(segments, self._winding_path, cfg)
+
+            if self._all_layer_paths:
+                # Çok katmanlı mod: her katman için ayrı G-code bloğu, sıralı birleştir
+                all_lines: list = []
+                total_len = 0.0
+                total_time = 0.0
+                total_circuits = 0
+                coverage = 0.0
+
+                for i, (layer_dict, wpath) in enumerate(self._all_layer_paths):
+                    ltype = layer_dict.get("layer_type") or layer_dict.get("type", "?")
+                    alpha = layer_dict.get("alpha_deg", 0.0)
+                    lbl = layer_dict.get("label", f"Katman {i + 1}")
+                    all_lines.append(f"; === Katman {i + 1}: {lbl} ({ltype} α={alpha:+.1f}°) ===")
+                    segs = plan_motion(wpath)
+                    gp_layer = generate_gcode(segs, wpath, cfg)
+                    # Skip header/footer lines for middle layers
+                    body = [ln for ln in gp_layer.lines
+                            if not ln.startswith("G21") and not ln.startswith("G90")
+                            and not ln.startswith("G28") and ln != "M30"
+                            and not ln.startswith("; Filament")
+                            and not ln.startswith("; Mandrel")
+                            and not ln.startswith("; Sarma")
+                            and not ln.startswith("; Toplam")
+                            and not ln.startswith("; Tahmini")]
+                    if i == 0:
+                        # Keep full header for first layer
+                        all_lines.extend(gp_layer.lines[:6])  # preamble
+                        body = gp_layer.lines[6:]
+                        body = [ln for ln in body if ln != "M30"]
+                    all_lines.extend(body)
+                    total_len += gp_layer.total_length_mm
+                    total_time += gp_layer.estimated_time_s
+                    total_circuits += gp_layer.n_circuits
+                    coverage = max(coverage, gp_layer.coverage_pct)
+
+                all_lines.append("M30  ; Program sonu")
+
+                # Build a combined GCodeProgram-like object
+                class _Combined:
+                    lines = all_lines
+                    n_circuits = total_circuits
+                    coverage_pct = coverage
+                    total_length_mm = total_len
+                    estimated_time_s = total_time
+
+                    def as_text(self):
+                        return "\n".join(self.lines)
+
+                gp = _Combined()
+
+            else:
+                # Tek-açı modu
+                segments = plan_motion(self._winding_path)
+                gp = generate_gcode(segments, self._winding_path, cfg)
+
             self._gcode_program = gp
             self._gcode_edit.setPlainText(gp.as_text())
             self._stat_circuits.setText(str(gp.n_circuits))
@@ -477,3 +583,41 @@ class CAMPanel(QWidget):
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(text)
             self._status_lbl.setText(f"Kaydedildi: {os.path.basename(path)}")
+
+    # ── Harici API ───────────────────────────────────────────────────────────
+
+    def set_layer_stack(self, stack) -> None:
+        """
+        Manuel Dizilim'den katman yığını al.
+        stack: dict (versiyon, layers) veya to_dict() metoduna sahip LayerStack.
+        """
+        if isinstance(stack, dict):
+            self._stack_dict = stack
+        elif hasattr(stack, "to_dict"):
+            self._stack_dict = stack.to_dict()
+        else:
+            self._stack_dict = {}
+
+        n = len((self._stack_dict or {}).get("layers", []))
+        if n > 0:
+            self._stack_info_lbl.setText(
+                f"Manuel Dizilim aktif: {n} katman  "
+                f"(α ve kat sayısı parametreleri yok sayılır)"
+            )
+            self._stack_info_lbl.setStyleSheet(
+                f"color: {COLOR['accent_bright']}; padding: 4px 8px; "
+                f"background: #1a3a1a; border-radius: 3px; font-weight: bold;"
+            )
+            self._alpha.setEnabled(False)
+            self._n_layers.setEnabled(False)
+        else:
+            self._stack_dict = None
+            self._stack_info_lbl.setText(
+                "Parametrik mod  (Manuel Dizilim'den yığın bekleniyor)"
+            )
+            self._stack_info_lbl.setStyleSheet(
+                f"color: {COLOR['text_secondary']}; padding: 4px 8px; "
+                f"background: {COLOR['bg_widget']}; border-radius: 3px; font-style: italic;"
+            )
+            self._alpha.setEnabled(True)
+            self._n_layers.setEnabled(True)

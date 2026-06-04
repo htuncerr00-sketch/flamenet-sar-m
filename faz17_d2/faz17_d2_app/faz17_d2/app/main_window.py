@@ -286,6 +286,11 @@ class FilamentWindingApp(QMainWindow):
             self._panel_3d.highlight_layer)
         self._panel_katman.kaymaUyarisi.connect(
             self._on_kayma_uyarisi)
+        # "→ Üretime Gönder" butonu → üretim merkezi + CAM
+        self._panel_katman.uretimeGonder.connect(
+            self._panel_uretim.set_layer_stack)
+        self._panel_katman.uretimeGonder.connect(
+            self._panel_cam.set_layer_stack)
 
         # Üretim tasarım merkezi → eksen limit uyarısı → alarmlar
         self._panel_uretim.eksenSinirUyarisi.connect(
