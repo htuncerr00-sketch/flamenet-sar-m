@@ -261,6 +261,10 @@ class FilamentWindingApp(QMainWindow):
         self._panel_katman.kaymaUyarisi.connect(
             self._on_kayma_uyarisi)
 
+        # Üretim tasarım merkezi → eksen limit uyarısı → alarmlar
+        self._panel_uretim.eksenSinirUyarisi.connect(
+            self._on_eksen_sinir_uyarisi)
+
         # Worker → panels
         w = self._worker
         w.frameBatch.connect(self._panel_live.on_frame_batch)
@@ -404,6 +408,21 @@ class FilamentWindingApp(QMainWindow):
             msg=f"Katman {layer_idx}: kayma oranı μ sınırını aştı",
             value=slip_ratio,
             threshold=0.5,
+            timestamp=_t.time(),
+        )
+        self._panel_alarms.on_safety_event(ev)
+
+    @Slot(str)
+    def _on_eksen_sinir_uyarisi(self, mesaj: str):
+        """G-code üretiminde eksen limit ihlalini alarm paneline yönlendir."""
+        import time as _t
+        from backend.core.safety_controller import SafetyEvent, SafetyLevel
+        ev = SafetyEvent(
+            level=SafetyLevel.WARN,
+            code="AXIS_LIMIT",
+            msg=f"G-code eksen limiti: {mesaj}",
+            value=0.0,
+            threshold=0.0,
             timestamp=_t.time(),
         )
         self._panel_alarms.on_safety_event(ev)

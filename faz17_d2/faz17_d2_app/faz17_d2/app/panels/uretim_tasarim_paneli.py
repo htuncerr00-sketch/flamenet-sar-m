@@ -56,6 +56,12 @@ class MachineProfile:
     program_bitis: str = "M30"
     hizlanma_pct: float = 10.0           # ilk/son devre % hız düşümü
     kubbe_hiz_pct: float = 60.0          # kubbe bölgelerinde % hız düşümü
+    # ── 4-eksen alanları (Fas 4) — JSON geriye-uyumlu ──────────────────────
+    y_eksen: str = "Y"                   # radyal sarım kafası (eye) ekseni
+    z_eksen: str = "Z"                   # sarım kafası yönlendirme ekseni
+    max_x_strok_mm: float = 1000.0       # taşıyıcı eksenel strok limiti
+    max_y_mm: float = 500.0              # radyal kafa erişim limiti
+    eye_standoff_mm: float = 0.0         # kafa-yüzey nominal mesafesi
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -246,7 +252,8 @@ class UretimTasarimPaneli(QWidget):
         apply_project(proje: dict)          — proje dict'inden yükle
     """
 
-    raporuGonder = Signal(dict)   # özet → proje yöneticisi
+    raporuGonder       = Signal(dict)   # özet → proje yöneticisi
+    eksenSinirUyarisi  = Signal(str)     # G-code eksen limit ihlali → alarmlar
 
     _DEBOUNCE_MS = 400
 
@@ -262,6 +269,7 @@ class UretimTasarimPaneli(QWidget):
         self._profiles: List[MachineProfile] = _load_profiles()
         self._active_profile_idx: int = 0
         self._last_analysis: Optional[Dict] = None
+        self._last_axis_warnings: List[str] = []   # son G-code üretim limit ihlalleri
 
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_AnalysisWorker] = None
@@ -838,6 +846,7 @@ class UretimTasarimPaneli(QWidget):
         if not path:
             QMessageBox.warning(self, "Hata", "Lütfen hedef dosya seçin.")
             return
+        self._last_axis_warnings = []
         content = self._generate_export_content(preview_only=False)
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -845,6 +854,13 @@ class UretimTasarimPaneli(QWidget):
             self._status_lbl.setText(f"Dışa aktarıldı: {os.path.basename(path)}")
         except Exception as exc:
             QMessageBox.critical(self, "Dışa Aktarma Hatası", str(exc))
+            return
+        # G-code ihracında eksen limit ihlali varsa ana pencereye uyarı fırlat
+        if self._export_fmt.currentIndex() == 0 and self._last_axis_warnings:
+            n = len(self._last_axis_warnings)
+            ilk = self._last_axis_warnings[0]
+            self.eksenSinirUyarisi.emit(
+                f"{n} eksen limit ihlali — ör: {ilk}")
 
     def _get_active_profile(self) -> MachineProfile:
         idx = self._export_profile_cb.currentIndex()
@@ -864,63 +880,239 @@ class UretimTasarimPaneli(QWidget):
         fn = fns[fmt_idx] if fmt_idx < len(fns) else self._gen_report
         return fn(preview_only)
 
-    def _gen_gcode(self, _preview: bool = False) -> str:
-        from datetime import datetime
-        p    = self._get_active_profile()
-        now  = datetime.now().strftime("%Y-%m-%d %H:%M")
-        hdr  = self._export_include_header.isChecked()
-        cmt  = self._export_comments.isChecked()
-        c    = p.yorum_prefix
-        x    = p.x_eksen
-        a    = p.a_eksen
-        feed = int(min(p.max_x_ilerleme_mm_dak, 2000))
-        D    = self._mandrel.get("cap_mm", 100.0)
-        L    = self._mandrel.get("uzunluk_mm", 300.0)
+    # ── 4-eksen G-code post-processor (Fas 4) ────────────────────────────────
+    #
+    # Eksenler:
+    #   X — taşıyıcı araba (mandrel ekseni boyunca doğrusal, mm)
+    #   Y — sarım kafası (eye) radyal yaklaşma/uzaklaşma (mm)
+    #   Z — kafa yönlendirme açısı (derece; yerel lif açısına kilitli)
+    #   A — iş mili (mandrel) sürekli dönüş (kümülatif derece)
+    #
+    # Clairaut senkronizasyonu: kubbede R_local küçüldükçe α_local artar;
+    # ilerleme hızı (F) ve iş mili devri (A oranı) dinamik düşürülür.
 
-        lines = []
-        if hdr:
-            lines += [
-                f"{c} Filament Sarma CAM — {now}",
-                f"{c} Mandrel: D={D:.1f}mm  L={L:.1f}mm",
-                f"{c} Kontrolör: {p.kontrolor_tipi}  X:{x}  A:{a}",
-                f"{c} Profil: {p.isim}",
-                "",
+    _GCODE_LINE_CAP = 20000   # güvenlik: aşırı büyük dosya koruması
+
+    def _gcode_header(self, p: MachineProfile, meta: Dict, cmt: bool) -> List[str]:
+        """Makine lehçesine göre başlık bloğu."""
+        from datetime import datetime
+        c   = p.yorum_prefix if p.kontrolor_tipi in ("grbl", "custom") else "("
+        cc  = "" if p.kontrolor_tipi in ("grbl", "custom") else ")"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        unit = "G20" if p.inch_modu else "G21"
+
+        def com(txt): return f"{c} {txt}{(' ' + cc) if cc else ''}"
+
+        head: List[str] = []
+        kind = p.kontrolor_tipi
+
+        # Fanuc program başlangıç jetonları YORUMLARDAN ÖNCE gelmeli (% ilk satır)
+        if kind == "fanuc":
+            head += ["%", "O0001"]
+
+        if cmt:
+            head += [
+                com(f"Filament Sarma CAM — {now}"),
+                com(f"Mandrel D={meta['D']:.1f}mm L={meta['L']:.1f}mm "
+                    f"kubbe H={meta['H']:.1f}mm"),
+                com(f"Kontrolor: {p.kontrolor_tipi}  eksenler: "
+                    f"{p.x_eksen}/{p.y_eksen}/{p.z_eksen}/{p.a_eksen}"),
+                com(f"Profil: {p.isim}  katman={meta['n_layers']} "
+                    f"devre={meta['n_circuits']}"),
             ]
-        if p.kontrolor_tipi in ("grbl", "custom"):
-            lines += ["G21", "G90", "G28"]
+
+        if kind in ("grbl", "custom"):
+            head += [unit, "G90", "G94", "G28"]
+        elif kind == "mach3":
+            head += [f"{unit} G90 G94", "G40 G49", "G28"]
+        elif kind == "fanuc":
+            head += [f"{unit} G90 G94", "G28 U0. W0."]
         else:
-            lines += ["G71", "G90", "G91.1"]
+            head += [unit, "G90", "G94", "G28"]
 
         if p.on_isitma_s > 0:
-            lines.append(f"G4 P{int(p.on_isitma_s * 1000)}" +
-                         (f"  {c} Ön ısıtma bekleme" if cmt else ""))
+            head.append(f"G4 P{int(p.on_isitma_s * 1000)}" +
+                        (f"  {com('On isitma bekleme')}" if cmt else ""))
+        return head
 
+    def _gcode_footer(self, p: MachineProfile) -> List[str]:
+        kind = p.kontrolor_tipi
+        if kind == "fanuc":
+            return ["G28 U0. W0.", "M5", p.program_bitis or "M30", "%"]
+        if kind == "mach3":
+            return ["G28", "M5", p.program_bitis or "M30"]
+        return ["M5", p.program_bitis or "M30"]
+
+    @staticmethod
+    def _fmt_move(p: MachineProfile, nline: Optional[int],
+                  x: float, y: float, z: float, a: float, f: float) -> str:
+        """Tek 4-eksen G1 hareket satırı (lehçeye göre N-numara opsiyonlu)."""
+        prefix = f"N{nline} " if nline is not None else ""
+        return (f"{prefix}G1 {p.x_eksen}{x:.3f} {p.y_eksen}{y:.3f} "
+                f"{p.z_eksen}{z:.3f} {p.a_eksen}{a:.3f} F{f:.0f}")
+
+    def _gen_gcode(self, _preview: bool = False) -> str:
+        p      = self._get_active_profile()
+        cmt    = self._export_comments.isChecked()
+        hdr    = self._export_include_header.isChecked()
         layers = self._stack_dict.get("layers", [])
-        x_pos = p.x_baslangic_mm
-        a_pos = 0.0
 
+        D = self._mandrel.get("cap_mm", 100.0)
+        L = self._mandrel.get("uzunluk_mm", 300.0)
+        H = float(self._mandrel.get("kubbe_yukseklik_mm", 0.0) or 0.0)
+
+        # Geometri profili (geometry_engine veya saf-Python fallback)
+        z_prof, r_prof, R_nom = self._build_profile_for_fea()
+        # Yola yeterli ama hafif istasyon kümesi
+        n_stat = 12 if _preview else 28
+        z_st, r_st = self._downsample(z_prof, r_prof, target=n_stat)
+        n_st = len(z_st)
+        z0, z1 = z_st[0], z_st[-1]
+
+        warnings: List[str] = []
+        line_no = 10
+        use_n = p.kontrolor_tipi in ("mach3", "fanuc")
+        comch = p.yorum_prefix if p.kontrolor_tipi in ("grbl", "custom") else "("
+        comcc = "" if p.kontrolor_tipi in ("grbl", "custom") else ")"
+
+        def comment(txt: str) -> str:
+            pre = f"N{line_no} " if use_n else ""
+            return f"{pre}{comch} {txt}{(' ' + comcc) if comcc else ''}"
+
+        # Strok limitleri (mutlak makine koordinatı)
+        x_lo = p.x_baslangic_mm
+        x_hi = p.x_baslangic_mm + p.max_x_strok_mm
+        feed_cap = p.max_x_ilerleme_mm_dak
+
+        # Toplam devre sayısı önceden hesap (başlık için)
+        total_circuits = 0
         for lyr in layers:
-            alpha = abs(lyr.get("alpha_deg", 45.0))
+            a_nom = abs(lyr.get("alpha_deg", 45.0))
             fw    = lyr.get("fitil_genisligi_mm", 6.0)
+            ov    = lyr.get("cakisma_pct", 5.0) / 100.0
+            sin_a = max(math.sin(math.radians(a_nom)), 1e-3)
+            pitch = fw / sin_a * (1 - ov)
+            total_circuits += max(1, math.ceil(math.pi * D / max(pitch, 1e-3)))
+
+        meta = {"D": D, "L": L, "H": H, "n_layers": len(layers),
+                "n_circuits": total_circuits}
+
+        body: List[str] = []
+
+        def emit(s: str):
+            nonlocal line_no
+            body.append(s)
+            if use_n:
+                line_no += 10
+
+        a_pos = 0.0   # kümülatif iş mili açısı (her zaman artar)
+        truncated = False
+
+        for li, lyr in enumerate(layers):
+            if len(body) > self._GCODE_LINE_CAP:
+                truncated = True
+                break
+
+            a_nom = abs(lyr.get("alpha_deg", 45.0))
+            fw    = lyr.get("fitil_genisligi_mm", 6.0)
+            ov    = lyr.get("cakisma_pct", 5.0) / 100.0
             tip   = lyr.get("layer_type", "helical")
+            feed_nom = max(1.0, lyr.get("feed_mm_s", 80.0)) * 60.0  # mm/dak
+
+            # Hoop için efektif nominal açı ~89.5°
+            a_eff = 89.5 if tip == "hoop" else a_nom
+            c0 = R_nom * math.sin(math.radians(a_eff))
+
+            sin_a = max(math.sin(math.radians(a_eff)), 1e-3)
+            pitch = fw / sin_a * (1 - ov)
+            n_circ = max(1, math.ceil(math.pi * D / max(pitch, 1e-3)))
+
+            # Nominal devir kontrolü (rpm = ilerleme / hatve)
+            rpm_nom = feed_nom / max(pitch, 1e-3)
+            if rpm_nom > p.max_a_rpm:
+                msg = (f"Katman {li+1} ({tip}): nominal devir {rpm_nom:.0f} > "
+                       f"max {p.max_a_rpm:.0f} RPM")
+                warnings.append(msg)
+                emit(comment(f"WARNING: Axis Limit Exceeded — {msg}"))
 
             if cmt:
-                lines.append(f"{c} --- {lyr.get('label','Katman')} ({tip}) a={alpha:.1f}° ---")
+                emit(comment(f"--- Katman {li+1} {lyr.get('label','')} "
+                             f"({tip}) a_nom={a_nom:.1f} devre={n_circ} ---"))
 
-            sin_a  = max(math.sin(math.radians(alpha)), 0.01)
-            pitch  = fw / sin_a
-            n_pass = max(1, math.ceil(math.pi * D / max(pitch, 0.01)))
+            # Devre faz kayması (kapsama için her devre çevresel ofset)
+            phase_per_circuit = 360.0 / max(n_circ, 1)
 
-            for _ in range(n_pass * 2):
-                x_end = L if x_pos < L / 2 else 0.0
-                dz = abs(x_end - x_pos)
-                da = math.degrees(dz / max((D / 2), 1.0) * math.tan(math.radians(alpha)))
-                a_end = a_pos + da
-                x_pos = x_end
-                a_pos = a_end
-                lines.append(f"G1 {x}{x_pos:.3f} {a}{a_pos:.3f} F{feed}")
+            for circ in range(n_circ):
+                if len(body) > self._GCODE_LINE_CAP:
+                    truncated = True
+                    break
 
-        lines += ["", p.program_bitis]
+                # İleri (z0→z1) ve geri (z1→z0) tarama: turnaround dahil
+                for direction in (+1, -1):
+                    stations = range(n_st) if direction > 0 else range(n_st - 1, -1, -1)
+                    for k in stations:
+                        zk = z_st[k]
+                        rk = max(r_st[k], 1e-3)
+
+                        # Clairaut yerel açı
+                        a_loc = self._alpha_local_deg(a_eff, R_nom, rk)
+
+                        # X = taşıyıcı (mutlak makine koordinatı)
+                        x_pos = p.x_baslangic_mm + (zk - z0)
+                        # Y = radyal kafa (yüzeyi takip + standoff)
+                        y_pos = rk + p.eye_standoff_mm
+                        # Z = kafa yönlendirme = yerel lif açısı
+                        z_pos = a_loc
+
+                        # Kubbe hız ölçeği: R_local/R_nom, kubbe_hiz_pct ile tabanlı
+                        scale = max(p.kubbe_hiz_pct / 100.0, rk / max(R_nom, 1e-3))
+                        scale = min(1.0, scale)
+                        feed = min(feed_nom * scale, feed_cap)
+
+                        # A = iş mili kümülatif açı; dθ = tan(α_loc)/r · dz
+                        if k == (0 if direction > 0 else n_st - 1) and circ == 0:
+                            dz = 0.0
+                        else:
+                            # bir önceki istasyona göre eksenel adım
+                            kp = k - direction
+                            dz = abs(zk - z_st[kp]) if 0 <= kp < n_st else 0.0
+                        tan_a = math.tan(math.radians(min(a_loc, 89.0)))
+                        d_theta = math.degrees(tan_a / rk * dz)
+                        # A her zaman artar — mil tek yönde döner (yön X'te değişir)
+                        a_pos += d_theta
+
+                        # ── Sınır denetimleri ──
+                        if x_pos < x_lo - 1e-6 or x_pos > x_hi + 1e-6:
+                            msg = (f"Katman {li+1} devre {circ+1}: X={x_pos:.1f} "
+                                   f"strok dışı [{x_lo:.0f},{x_hi:.0f}]")
+                            warnings.append(msg)
+                            emit(comment(f"WARNING: Axis Limit Exceeded — {msg}"))
+                        if y_pos > p.max_y_mm + 1e-6:
+                            msg = (f"Katman {li+1}: Y={y_pos:.1f} radyal limit "
+                                   f"{p.max_y_mm:.0f} aşıldı")
+                            warnings.append(msg)
+                            emit(comment(f"WARNING: Axis Limit Exceeded — {msg}"))
+
+                        emit(self._fmt_move(p, line_no if use_n else None,
+                                            x_pos, y_pos, z_pos, a_pos, feed))
+
+                # Devre sonunda çevresel faz ofseti (kapsama)
+                a_pos += phase_per_circuit
+
+        if truncated:
+            body.append(comment(
+                f"... ({self._GCODE_LINE_CAP}+ satir — dosya guvenlik siniri)"))
+
+        # Uyarıları sakla (export sinyali için)
+        self._last_axis_warnings = warnings
+
+        lines: List[str] = []
+        if hdr:
+            lines += self._gcode_header(p, meta, cmt)
+        if cmt and warnings:
+            lines.append(comment(f"TOPLAM {len(warnings)} EKSEN LIMIT UYARISI"))
+        lines += body
+        lines += self._gcode_footer(p)
         return "\n".join(lines)
 
     def _gen_csv(self, _preview: bool = False) -> str:
