@@ -78,12 +78,41 @@ def main_window_smoke_test():
     t0 = time.perf_counter()
     rc = app.exec()
     elapsed = time.perf_counter() - t0
+    # The window grew from 7 → 13 tabs across Faz 23/24 (project/material/layer
+    # design panels + production design centre). Require the full current set.
     return {
         "n_tabs":   n_tabs,
         "rc":       rc,
         "elapsed":  round(elapsed, 2),
-        "passed":   (n_tabs == 7 and rc == 0 and elapsed < 3.0),
+        "passed":   (n_tabs >= 13 and rc == 0 and elapsed < 3.0),
     }
+
+
+def _d1_package_cwd() -> str:
+    """Locate the directory from which ``python -m faz17_d1.phase17_validation``
+    resolves — i.e. the ancestor holding a ``faz17_d1`` package that contains
+    the structured ``hardware`` subpackage.
+
+    Avoids a hardcoded absolute path so the regression runs from any checkout
+    location (CI, container, developer machine). Falls back to the repo root.
+    """
+    here = os.path.abspath(__file__)
+    d = here
+    repo_root = None
+    for _ in range(8):
+        d = os.path.dirname(d)
+        pkg = os.path.join(d, "faz17_d1")
+        if os.path.isdir(pkg):
+            if repo_root is None:
+                repo_root = d
+            # Prefer the layout where faz17_d1 has the structured subpackages.
+            if os.path.isdir(os.path.join(pkg, "hardware")):
+                return d
+            nested = os.path.join(pkg, "faz17_d1_backend")
+            if os.path.isdir(os.path.join(nested, "faz17_d1", "hardware")):
+                return nested
+    return repo_root or os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(here))))
 
 
 def backend_d1_regression():
@@ -91,7 +120,7 @@ def backend_d1_regression():
     import subprocess
     proc = subprocess.run(
         [sys.executable, "-m", "faz17_d1.phase17_validation"],
-        cwd="/home/claude/filament_winding",
+        cwd=_d1_package_cwd(),
         capture_output=True, text=True, timeout=120)
     out = proc.stdout
     ready = "BACKEND READY" in out

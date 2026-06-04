@@ -58,9 +58,21 @@ class FilamentWindingApp(QMainWindow):
         self.setWindowTitle("Filament Sarma Kontrolü")
         self.resize(1600, 1000)
 
-        # Backend stack — link is factory-driven (Mock or Real per config)
+        # Backend stack — link is factory-driven (Mock or Real per config).
+        # If a real link is requested but its source/driver is unavailable, we
+        # degrade gracefully to mock rather than crash at startup. The reason is
+        # stashed in _link_init_warning and surfaced on the status bar once it
+        # exists (see _build_statusbar).
         self._link_config = link_config or LinkConfig.from_env()
-        self._link: ESP32LinkBase = make_link(self._link_config)
+        self._link_init_warning: str = ""
+        try:
+            self._link: ESP32LinkBase = make_link(self._link_config)
+        except Exception as exc:
+            self._link_init_warning = (
+                f"Gerçek link başlatılamadı ({exc}); simülasyon (mock) moduna geçildi."
+            )
+            self._link_config.kind = "mock"
+            self._link = make_link(self._link_config)
         self._stream = TelemetryStream()
         self._safety = SafetyController()
         self._motion = MotionController(self._link, self._safety)
@@ -228,6 +240,9 @@ class FilamentWindingApp(QMainWindow):
         sb.addPermanentWidget(self._sb_drops)
         sb.addPermanentWidget(self._sb_alarms)
         sb.addPermanentWidget(self._sb_fps)
+        # Surface any link-init degradation (real → mock fallback) safely.
+        if getattr(self, "_link_init_warning", ""):
+            sb.showMessage(self._link_init_warning, 12000)
 
     def _connect_signals(self):
         # ── Tasarım iş akışı sinyalleri ──────────────────────────────────────
@@ -344,31 +359,58 @@ class FilamentWindingApp(QMainWindow):
         it for a RealESP32Link with the requested port. Either way, the
         operator must click Connect next.
         """
-        from backend.hardware.real_esp32_link import RealESP32Link
+        # RealESP32Link may be a stub (source missing) — import defensively so a
+        # missing hardware module never crashes the port-change handler.
+        try:
+            from backend.hardware.real_esp32_link import RealESP32Link
+        except Exception as exc:
+            self.statusBar().showMessage(
+                f"Gerçek link modülü kullanılamıyor ({exc}); port değişimi "
+                f"yok sayıldı.", 8000)
+            return
+
         # Make sure we're disconnected first
         try:
             self._link.disconnect()
         except Exception:
             pass
+
         # Swap if needed
         if not isinstance(self._link, RealESP32Link):
-            # Re-create as Real with the picked port
+            # Re-create as Real with the picked port. make_link raises a clear
+            # RuntimeError if the real link is unavailable — catch it, keep the
+            # current (mock) link, and log to the status bar.
+            prev_kind = self._link_config.kind
             self._link_config.kind = "real"
             self._link_config.port = port
             self._link_config.baud = baud
-            self._link = make_link(self._link_config)
+            try:
+                new_link = make_link(self._link_config)
+            except Exception as exc:
+                self._link_config.kind = prev_kind  # roll back config
+                self.statusBar().showMessage(
+                    f"Gerçek donanıma geçilemedi ({exc}); mevcut bağlantı "
+                    f"korunuyor.", 8000)
+                return
+            self._link = new_link
             # Re-wire link → bridge queue + motion controller
             self._link_q = queue.Queue(maxsize=2000)
             self._link.subscribe(self._link_q)
             self._motion._link = self._link  # rebind motion to new link
             # Re-wire worker connection state signal (worker reads link state)
             self._worker._link = self._link
+            self.statusBar().showMessage(
+                f"Gerçek ESP32 link hazır: {port} @ {baud} baud "
+                f"(Bağlan'a basın).", 6000)
         else:
             # Reconfigure existing real link's port path
             try:
                 self._link.set_port(port, baud)
-            except RuntimeError:
-                pass
+                self.statusBar().showMessage(
+                    f"Port güncellendi: {port} @ {baud} baud.", 5000)
+            except RuntimeError as exc:
+                self.statusBar().showMessage(
+                    f"Port güncellenemedi ({exc}).", 6000)
 
     @Slot()
     def _on_disconnect(self):

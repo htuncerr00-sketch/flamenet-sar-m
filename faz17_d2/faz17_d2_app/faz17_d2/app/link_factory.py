@@ -17,7 +17,17 @@ from dataclasses import dataclass
 from typing import Optional
 
 from backend.hardware.esp32_link import ESP32LinkBase, MockESP32Link
-from backend.hardware.real_esp32_link import RealESP32Link
+
+# Real link is optional at import time. The backend.hardware.real_esp32_link
+# module is itself a soft loader (it never raises on import, only on
+# instantiation when the source is missing). We still guard the import here so
+# that even an unexpected loader failure cannot prevent mock-only boots.
+try:
+    from backend.hardware.real_esp32_link import RealESP32Link
+    _REAL_LINK_IMPORT_ERROR: str = ""
+except Exception as _exc:  # pragma: no cover - defensive
+    RealESP32Link = None  # type: ignore[assignment,misc]
+    _REAL_LINK_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
 
 
 @dataclass
@@ -50,10 +60,25 @@ class LinkConfig:
         return cfg
 
 
+def real_link_available() -> bool:
+    """True if a real ESP32 link class was importable (source present)."""
+    return RealESP32Link is not None
+
+
 def make_link(cfg: Optional[LinkConfig] = None) -> ESP32LinkBase:
-    """Construct and return a link object (not connected yet)."""
+    """Construct and return a link object (not connected yet).
+
+    Raises ``RuntimeError`` only when ``kind == "real"`` but the real link
+    source is unavailable, so callers can catch it and fall back to mock /
+    log to the status bar instead of crashing.
+    """
     cfg = cfg or LinkConfig.from_env()
     if cfg.kind == "real":
+        if RealESP32Link is None:
+            raise RuntimeError(
+                "Gerçek ESP32 link modülü yüklenemedi"
+                + (f" ({_REAL_LINK_IMPORT_ERROR})" if _REAL_LINK_IMPORT_ERROR else "")
+            )
         return RealESP32Link(
             port=cfg.port,
             baud=cfg.baud,
