@@ -99,16 +99,22 @@ class _AnalysisWorker(QObject):
 
     def __init__(self, stack_dict: Dict, mandrel: Dict, material_key: str,
                  mu: float, fiber_cost: float, resin_cost: float,
-                 labor_rate: float, vf: float):
+                 labor_rate: float, vf: float,
+                 tex: float = 800.0, overhead_pct: float = 20.0,
+                 resin_density: float = 1.2, accel_pct: float = 10.0):
         super().__init__()
-        self._stack   = stack_dict
-        self._mandrel = mandrel
-        self._matkey  = material_key
-        self._mu      = mu
-        self._fiber_c = fiber_cost
-        self._resin_c = resin_cost
-        self._labor   = labor_rate
-        self._vf      = vf
+        self._stack         = stack_dict
+        self._mandrel       = mandrel
+        self._matkey        = material_key
+        self._mu            = mu
+        self._fiber_c       = fiber_cost
+        self._resin_c       = resin_cost
+        self._labor         = labor_rate
+        self._vf            = vf
+        self._tex           = tex           # g/km (tow linear density)
+        self._overhead_pct  = overhead_pct
+        self._resin_density = resin_density  # g/cm³
+        self._accel_pct     = accel_pct      # % of stroke used for ramp-up
 
     @Slot()
     def run(self):
@@ -163,77 +169,100 @@ class _AnalysisWorker(QObject):
             })
 
         # ── Maliyet & süre hesabı ─────────────────────────────────────────────
-        # Materyal yoğunluğu (carbon/epoxy tipik)
+        # Fiber yoğunluğu (carbon/epoxy tipik)
         try:
             from backend.core.material_allowables import ENGINEERING_MATERIALS
             mat = ENGINEERING_MATERIALS.get(self._matkey)
-            if mat:
-                rho_kg_m3 = getattr(mat, "density_kg_m3", 1580.0)
-            else:
-                rho_kg_m3 = 1580.0
+            rho_kg_m3 = getattr(mat, "density_kg_m3", 1580.0) if mat else 1580.0
         except Exception:
             rho_kg_m3 = 1580.0
 
-        total_fiber_m = 0.0
-        total_time_s  = 0.0
-        total_t_mm    = 0.0
+        total_fiber_m  = 0.0
+        total_time_s   = 0.0
+        total_t_mm     = 0.0
 
-        for lyr in layers:
-            alpha_deg = abs(lyr.get("alpha_deg", 45.0))
-            alpha_rad = math.radians(max(1.0, alpha_deg))
-            fw_mm = lyr.get("fitil_genisligi_mm", 6.0)
-            t_ply = lyr.get("thickness_mm", 0.3)
-            overlap = lyr.get("cakisma_pct", 5.0) / 100.0
-            feed_mm_s = max(1.0, lyr.get("feed_mm_s", 80.0))
-            tip = lyr.get("layer_type", "helical")
+        TIP_TR = {"helical": "Sarmal", "hoop": "Çevre", "polar": "Kutupsal",
+                  "transition": "Geçiş", "skin_finish": "Kaplama"}
+        layer_breakdown: List[Dict] = []
 
-            sin_a = max(math.sin(alpha_rad), 0.01)
-            pitch_mm = fw_mm / sin_a * (1 - overlap)
-            n_circuits = max(1, math.ceil(math.pi * D_mm / max(pitch_mm, 0.01)))
+        for idx, lyr in enumerate(layers):
+            alpha_deg  = abs(lyr.get("alpha_deg", 45.0))
+            alpha_rad  = math.radians(max(1.0, alpha_deg))
+            fw_mm      = lyr.get("fitil_genisligi_mm", 6.0)
+            t_ply      = lyr.get("thickness_mm", 0.3)
+            overlap    = lyr.get("cakisma_pct", 5.0) / 100.0
+            feed_mm_s  = max(1.0, lyr.get("feed_mm_s", 80.0))
+            tip        = lyr.get("layer_type", "helical")
+
+            sin_a     = max(math.sin(alpha_rad), 0.01)
+            pitch_mm  = fw_mm / sin_a * (1 - overlap)
+            n_circ    = max(1, math.ceil(math.pi * D_mm / max(pitch_mm, 0.01)))
 
             if tip == "hoop":
                 circuit_len_mm = math.pi * D_mm + 2 * fw_mm
-                n_circuits = max(1, math.ceil(L_mm / max(fw_mm * (1 - overlap), 0.01)))
+                n_circ = max(1, math.ceil(L_mm / max(fw_mm * (1 - overlap), 0.01)))
             else:
                 circuit_len_mm = math.sqrt((math.pi * D_mm) ** 2 + L_mm ** 2)
 
-            fiber_len_mm = n_circuits * circuit_len_mm * 2  # ×2 ileri+geri
-            fiber_m = fiber_len_mm / 1000.0
+            fiber_len_mm = n_circ * circuit_len_mm * 2   # ×2 ileri+geri
+            fiber_m      = fiber_len_mm / 1000.0
+
+            # Hızlanma gecikme süresi — trapez profili (ivmelenme + frenleme)
+            accel_dist_mm = L_mm * max(0.0, self._accel_pct) / 100.0
+            n_passes      = 2 * n_circ   # her devre: ileri + geri
+            t_accel_layer = n_passes * 2.0 * accel_dist_mm / feed_mm_s
+            t_wind_layer  = fiber_len_mm / feed_mm_s
+            layer_time_s  = t_wind_layer + t_accel_layer
+
             total_fiber_m  += fiber_m
-            total_time_s   += fiber_len_mm / feed_mm_s
+            total_time_s   += layer_time_s
             total_t_mm     += t_ply
 
-        total_fiber_mm = total_fiber_m * 1000.0
+            # Tex tabanlı katman kütlesi: tex [g/km] × uzunluk [m] / 1e6 = kg
+            m_f_layer = fiber_m * self._tex / 1e6
 
-        # Kütle (silindir mandrel)
-        surface_area_mm2 = 2 * math.pi * R_mm * L_mm
-        vol_fiber_mm3 = surface_area_mm2 * total_t_mm * vf
-        m_fiber_kg = vol_fiber_mm3 * 1e-9 * rho_kg_m3
-        m_resin_kg = m_fiber_kg * (1 - vf) / vf * (1.2 / rho_kg_m3 * 1000)
+            layer_breakdown.append({
+                "idx":        idx,
+                "etiket":     lyr.get("label", f"Katman {idx+1}"),
+                "tip_tr":     TIP_TR.get(tip, tip),
+                "alpha_deg":  lyr.get("alpha_deg", 45.0),
+                "n_circuits": n_circ,
+                "fiber_m":    round(fiber_m, 2),
+                "time_s":     round(layer_time_s, 1),
+                "m_fiber_kg": round(m_f_layer, 4),
+                "fiber_usd":  round(m_f_layer * self._fiber_c, 2),
+            })
+
+        # ── Tex tabanlı toplam fiber kütlesi ──────────────────────────────────
+        # tex = g/km → m_fiber [kg] = total_fiber_m [m] × tex / 1_000_000
+        m_fiber_kg = total_fiber_m * self._tex / 1e6
+
+        # Reçine kütlesi — ρ ağırlıklı Vf dönüşümü
+        rho_resin_kg_m3 = self._resin_density * 1000.0   # g/cm³ → kg/m³
+        m_resin_kg = m_fiber_kg * (1.0 - vf) / vf * (rho_resin_kg_m3 / rho_kg_m3)
         m_total_kg = m_fiber_kg + m_resin_kg
 
-        # Tex varsayımı: 800 tex (6 g/km) tipik CF
-        tex = 800.0
-        m_fiber_tex = total_fiber_mm / 1e6 * tex  # kg
-        m_fiber_kg = max(m_fiber_kg, m_fiber_tex)
-
-        fiber_usd  = m_fiber_kg  * self._fiber_c
-        resin_usd  = m_resin_kg  * self._resin_c
-        labor_usd  = (total_time_s / 3600.0) * self._labor
-        overhead   = (fiber_usd + resin_usd + labor_usd) * 0.20
-        total_usd  = fiber_usd + resin_usd + labor_usd + overhead
+        fiber_usd   = m_fiber_kg * self._fiber_c
+        resin_usd   = m_resin_kg * self._resin_c
+        labor_usd   = (total_time_s / 3600.0) * self._labor
+        overhead_f  = max(0.0, self._overhead_pct) / 100.0
+        overhead    = (fiber_usd + resin_usd + labor_usd) * overhead_f
+        total_usd   = fiber_usd + resin_usd + labor_usd + overhead
 
         cost = {
-            "total_fiber_m": round(total_fiber_m, 1),
-            "m_fiber_kg": round(m_fiber_kg, 3),
-            "m_resin_kg": round(m_resin_kg, 3),
-            "m_total_kg": round(m_total_kg, 3),
-            "time_s": round(total_time_s, 1),
-            "fiber_usd": round(fiber_usd, 2),
-            "resin_usd": round(resin_usd, 2),
-            "labor_usd": round(labor_usd, 2),
-            "overhead_usd": round(overhead, 2),
-            "total_usd": round(total_usd, 2),
+            "total_fiber_m":   round(total_fiber_m, 1),
+            "m_fiber_kg":      round(m_fiber_kg, 3),
+            "m_resin_kg":      round(m_resin_kg, 3),
+            "m_total_kg":      round(m_total_kg, 3),
+            "time_s":          round(total_time_s, 1),
+            "fiber_usd":       round(fiber_usd, 2),
+            "resin_usd":       round(resin_usd, 2),
+            "labor_usd":       round(labor_usd, 2),
+            "overhead_usd":    round(overhead, 2),
+            "total_usd":       round(total_usd, 2),
+            "overhead_pct":    self._overhead_pct,
+            "tex":             self._tex,
+            "layer_breakdown": layer_breakdown,
         }
 
         return {"slip_rows": slip_rows, "cost": cost}
@@ -466,63 +495,100 @@ class UretimTasarimPaneli(QWidget):
 
     def _build_cost_tab(self) -> QWidget:
         w = QWidget()
-        layout = QHBoxLayout(w)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(8)
 
-        left = QGroupBox("Maliyet Parametreleri")
+        top_row = QHBoxLayout()
+        top_row.setSpacing(10)
+
+        # ── Sol: girdi parametreleri ──────────────────────────────────────────
+        left = QGroupBox("Maliyet & Sarma Parametreleri")
         ll = QGridLayout(left)
-        ll.setSpacing(6)
+        ll.setSpacing(5)
         row = 0
 
-        def _dspin(lo, hi, val, suf=""):
+        def _dspin(lo, hi, val, dec=2, suf="", step=None):
             s = QDoubleSpinBox()
-            s.setRange(lo, hi); s.setValue(val)
-            if suf: s.setSuffix(f" {suf}")
+            s.setRange(lo, hi); s.setValue(val); s.setDecimals(dec)
+            if suf:  s.setSuffix(f" {suf}")
+            if step: s.setSingleStep(step)
             return s
 
+        # Fiber parametreleri
+        ll.addWidget(QLabel("Fiber tex değeri:"), row, 0)
+        self._tex_spin = _dspin(1, 30000, 800, dec=0, suf="tex", step=100)
+        self._tex_spin.setToolTip(
+            "Fitil doğrusal yoğunluğu (g/km).\n"
+            "Karbon CF: 200–3000 tex  |  Cam: 1200–4800 tex")
+        ll.addWidget(self._tex_spin, row, 1); row += 1
+
         ll.addWidget(QLabel("Fiber maliyeti:"), row, 0)
-        self._fiber_cost = _dspin(0.1, 1000, 25.0, "$/kg")
+        self._fiber_cost = _dspin(0.1, 1000, 25.0, suf="$/kg")
         ll.addWidget(self._fiber_cost, row, 1); row += 1
 
+        ll.addWidget(QLabel("Reçine yoğunluğu:"), row, 0)
+        self._resin_density_spin = _dspin(0.5, 2.5, 1.2, dec=2, suf="g/cm³")
+        self._resin_density_spin.setToolTip("Epoksi: 1.15–1.25 | Poliester: 1.10–1.20")
+        ll.addWidget(self._resin_density_spin, row, 1); row += 1
+
         ll.addWidget(QLabel("Reçine maliyeti:"), row, 0)
-        self._resin_cost = _dspin(0.1, 500, 8.0, "$/kg")
+        self._resin_cost = _dspin(0.1, 500, 8.0, suf="$/kg")
         ll.addWidget(self._resin_cost, row, 1); row += 1
 
+        ll.addWidget(QLabel("Fiber hacim oranı Vf:"), row, 0)
+        self._vf_spin = _dspin(0.20, 0.75, 0.55, dec=3)
+        ll.addWidget(self._vf_spin, row, 1); row += 1
+
         ll.addWidget(QLabel("İşçilik ücreti:"), row, 0)
-        self._labor_cost = _dspin(1, 500, 45.0, "$/saat")
+        self._labor_cost = _dspin(1, 500, 45.0, dec=1, suf="$/saat")
         ll.addWidget(self._labor_cost, row, 1); row += 1
 
-        ll.addWidget(QLabel("Fiber hacim oranı Vf:"), row, 0)
-        self._vf_spin = _dspin(0.20, 0.75, 0.55)
-        ll.addWidget(self._vf_spin, row, 1); row += 1
+        ll.addWidget(QLabel("Genel gider oranı:"), row, 0)
+        self._overhead_spin = _dspin(0, 100, 20.0, dec=1, suf="%")
+        self._overhead_spin.setToolTip("Hammadde + işçilik toplamına uygulanır")
+        ll.addWidget(self._overhead_spin, row, 1); row += 1
+
+        ll.addWidget(QLabel("Hızlanma bölgesi:"), row, 0)
+        self._accel_cost_spin = _dspin(0, 50, 10.0, dec=1, suf="% strok")
+        self._accel_cost_spin.setToolTip(
+            "Trapez hız profili: strokun bu kadar %'si ivmelenme/frenlemeye ayrılır")
+        ll.addWidget(self._accel_cost_spin, row, 1); row += 1
 
         ll.setRowStretch(row, 1)
         calc_btn = QPushButton("Hesapla")
         calc_btn.clicked.connect(self._schedule_analysis)
         ll.addWidget(calc_btn, row, 0, 1, 2)
-        layout.addWidget(left)
+        top_row.addWidget(left)
 
-        right = QGroupBox("Tahmin Sonuçları")
+        # Canlı güncelleme bağlantıları
+        for sp in (self._tex_spin, self._fiber_cost, self._resin_density_spin,
+                   self._resin_cost, self._vf_spin, self._labor_cost,
+                   self._overhead_spin, self._accel_cost_spin):
+            sp.valueChanged.connect(self._schedule_analysis)
+
+        # ── Sağ: özet sonuçlar ────────────────────────────────────────────────
+        right = QGroupBox("Tahmin Özeti")
         rl = QGridLayout(right)
         rl.setSpacing(4)
         row = 0
 
         self._cost_fields: Dict[str, QLabel] = {}
         items = [
-            ("fiber_len",   "Toplam fiber uzunluğu",  "m"),
-            ("fiber_mass",  "Fiber kütlesi",           "kg"),
-            ("resin_mass",  "Reçine kütlesi",          "kg"),
-            ("total_mass",  "Toplam parça kütlesi",    "kg"),
-            ("time_str",    "Sarma süresi",             ""),
-            ("fiber_usd",   "Fiber maliyeti",          "$"),
-            ("resin_usd",   "Reçine maliyeti",         "$"),
-            ("labor_usd",   "İşçilik maliyeti",        "$"),
-            ("overhead",    "Genel gider (%20)",       "$"),
-            ("total_usd",   "Toplam maliyet",          "$"),
+            ("fiber_len",   "Toplam fiber uzunluğu",    "m"),
+            ("fiber_mass",  "Fiber kütlesi",             "kg"),
+            ("resin_mass",  "Reçine kütlesi",            "kg"),
+            ("total_mass",  "Toplam parça kütlesi",      "kg"),
+            ("time_str",    "Toplam sarma süresi",        ""),
+            ("fiber_usd",   "Fiber maliyeti",            "$"),
+            ("resin_usd",   "Reçine maliyeti",           "$"),
+            ("labor_usd",   "İşçilik maliyeti",          "$"),
+            ("overhead",    "Genel gider",               "$"),
+            ("total_usd",   "Toplam maliyet",            "$"),
         ]
         for key, label, unit in items:
-            rl.addWidget(QLabel(label + ":"), row, 0)
+            lbl = QLabel(label + ":")
+            rl.addWidget(lbl, row, 0)
             val = QLabel("—")
             val.setProperty("role", "body")
             val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -534,7 +600,23 @@ class UretimTasarimPaneli(QWidget):
 
         rl.setColumnStretch(1, 1)
         rl.setRowStretch(row, 1)
-        layout.addWidget(right, stretch=1)
+        top_row.addWidget(right, stretch=1)
+        outer.addLayout(top_row)
+
+        # ── Alt: katman kırılım tablosu ───────────────────────────────────────
+        brk_grp = QGroupBox("Katman Kırılımı")
+        brk_lay = QVBoxLayout(brk_grp)
+        self._breakdown_table = QTableWidget(0, 9)
+        self._breakdown_table.setHorizontalHeaderLabels([
+            "#", "Etiket", "Tür", "Açı (°)", "Devre",
+            "Fiber (m)", "Süre (dak)", "Kütle (kg)", "Maliyet ($)"
+        ])
+        self._breakdown_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._breakdown_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._breakdown_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._breakdown_table.setMaximumHeight(180)
+        brk_lay.addWidget(self._breakdown_table)
+        outer.addWidget(brk_grp)
         return w
 
     # ── Sekme 3: Dışa Aktarma ────────────────────────────────────────────────
@@ -557,6 +639,7 @@ class UretimTasarimPaneli(QWidget):
             "ABAQUS Giriş (.inp)",
             "NASTRAN Güverte (.bdf)",
             "Kapsamlı Rapor (.txt)",
+            "HTML Rapor (.html)",
         ])
         self._export_fmt.currentIndexChanged.connect(self._on_export_fmt_changed)
         tl.addWidget(self._export_fmt, row, 1, 1, 3); row += 1
@@ -583,7 +666,11 @@ class UretimTasarimPaneli(QWidget):
 
         export_btn = QPushButton("Dışa Aktar")
         export_btn.clicked.connect(self._on_export)
-        tl.addWidget(export_btn, row, 0, 1, 4); row += 1
+        tl.addWidget(export_btn, row, 0, 1, 2)
+        pdf_btn = QPushButton("PDF Olarak Kaydet")
+        pdf_btn.setToolTip("HTML raporu oluşturur ve PDF dosyası olarak kaydeder")
+        pdf_btn.clicked.connect(self._on_save_pdf)
+        tl.addWidget(pdf_btn, row, 2, 1, 2); row += 1
         layout.addWidget(top)
 
         preview_grp = QGroupBox("Önizleme (ilk 30 satır)")
@@ -713,7 +800,12 @@ class UretimTasarimPaneli(QWidget):
 
         self._worker = _AnalysisWorker(
             self._stack_dict, self._mandrel,
-            self._material_key, mu, fc, rc, lc, vf)
+            self._material_key, mu, fc, rc, lc, vf,
+            tex=self._tex_spin.value(),
+            overhead_pct=self._overhead_spin.value(),
+            resin_density=self._resin_density_spin.value(),
+            accel_pct=self._accel_cost_spin.value(),
+        )
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
@@ -725,11 +817,12 @@ class UretimTasarimPaneli(QWidget):
     @Slot(dict)
     def _on_analysis_done(self, result: Dict):
         self._last_analysis = result
+        cost = result.get("cost", {})
         self._update_slip_tab(result.get("slip_rows", []))
-        self._update_cost_tab(result.get("cost", {}))
+        self._update_cost_tab(cost)
+        self._update_breakdown_table(cost.get("layer_breakdown", []))
         self._update_export_preview()
         self._status_lbl.setText("Analiz tamamlandı.")
-        # latest-wins: worker çalışırken yeni veri geldiyse en güncel snapshot'la yeniden çalış.
         if self._pending_recalc:
             self._run_analysis()
 
@@ -791,8 +884,6 @@ class UretimTasarimPaneli(QWidget):
     # ── Maliyet sekmesini güncelle ────────────────────────────────────────────
 
     def _update_cost_tab(self, cost: Dict):
-        def _s(sec): return f"{cost.get(sec, 0.0)}"
-
         t_s = cost.get("time_s", 0.0)
         h, rem = divmod(int(t_s), 3600)
         m, s   = divmod(rem, 60)
@@ -806,13 +897,38 @@ class UretimTasarimPaneli(QWidget):
         self._cost_fields["fiber_usd"].setText(f"{cost.get('fiber_usd', 0):.2f}")
         self._cost_fields["resin_usd"].setText(f"{cost.get('resin_usd', 0):.2f}")
         self._cost_fields["labor_usd"].setText(f"{cost.get('labor_usd', 0):.2f}")
-        self._cost_fields["overhead"].setText(f"{cost.get('overhead_usd', 0):.2f}")
+        ovh_pct = cost.get("overhead_pct", 20.0)
+        self._cost_fields["overhead"].setText(
+            f"{cost.get('overhead_usd', 0):.2f}  (%{ovh_pct:.0f})")
         self._cost_fields["total_usd"].setText(f"{cost.get('total_usd', 0):.2f}")
+
+    # ── Katman kırılım tablosunu güncelle ─────────────────────────────────────
+
+    def _update_breakdown_table(self, breakdown: List[Dict]):
+        self._breakdown_table.setRowCount(len(breakdown))
+        for r, row in enumerate(breakdown):
+            t_s = row.get("time_s", 0.0)
+            t_min = t_s / 60.0
+            vals = [
+                str(row.get("idx", r) + 1),
+                row.get("etiket", ""),
+                row.get("tip_tr", ""),
+                f"{row.get('alpha_deg', 0):+.1f}",
+                str(row.get("n_circuits", 0)),
+                f"{row.get('fiber_m', 0):.1f}",
+                f"{t_min:.1f}",
+                f"{row.get('m_fiber_kg', 0):.4f}",
+                f"{row.get('fiber_usd', 0):.2f}",
+            ]
+            for c, v in enumerate(vals):
+                item = QTableWidgetItem(str(v))
+                item.setTextAlignment(Qt.AlignCenter)
+                self._breakdown_table.setItem(r, c, item)
 
     # ── Dışa aktarma ──────────────────────────────────────────────────────────
 
     def _on_export_fmt_changed(self, idx: int):
-        fmts = [".nc", ".csv", ".inp", ".bdf", ".txt"]
+        fmts = [".nc", ".csv", ".inp", ".bdf", ".txt", ".html"]
         ext = fmts[idx] if idx < len(fmts) else ".txt"
         path = self._export_path.text()
         if path and "." in os.path.basename(path):
@@ -829,6 +945,7 @@ class UretimTasarimPaneli(QWidget):
             "ABAQUS (*.inp)",
             "NASTRAN (*.bdf)",
             "Metin Raporu (*.txt)",
+            "HTML Raporu (*.html)",
         ]
         flt = filters[fmt_idx] if fmt_idx < len(filters) else "Tüm dosyalar (*)"
         path, _ = QFileDialog.getSaveFileName(self, "Dışa Aktar", "", flt)
@@ -876,6 +993,7 @@ class UretimTasarimPaneli(QWidget):
             self._gen_abaqus,
             self._gen_nastran,
             self._gen_report,
+            self._gen_html_report,
         ]
         fn = fns[fmt_idx] if fmt_idx < len(fns) else self._gen_report
         return fn(preview_only)
@@ -1407,6 +1525,240 @@ class UretimTasarimPaneli(QWidget):
 
         lines += ["", "=" * 60, "Rapor sonu."]
         return "\n".join(lines)
+
+    # ── HTML Üretim Reçetesi ──────────────────────────────────────────────────
+
+    def _gen_html_report(self, _preview: bool = False) -> str:
+        """
+        Tam HTML Mühendislik Üretim Reçetesi.
+        QTextDocument tarafından renderlanabilir; PDF'e de dönüştürülebilir.
+        """
+        from datetime import datetime
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        d    = self._mandrel
+        D_mm = d.get("cap_mm", 0.0)
+        L_mm = d.get("uzunluk_mm", 0.0)
+        H_mm = float(d.get("kubbe_yukseklik_mm", 0.0) or 0.0)
+        P    = d.get("basinc_MPa", 0.0)
+
+        cost = (self._last_analysis or {}).get("cost", {})
+        slip = (self._last_analysis or {}).get("slip_rows", [])
+        breakdown = cost.get("layer_breakdown", [])
+        layers = self._stack_dict.get("layers", [])
+
+        # ── Zaman biçimlendirme ───────────────────────────────────────────────
+        t_s = cost.get("time_s", 0.0)
+        h, rem = divmod(int(t_s), 3600)
+        mn, sc = divmod(rem, 60)
+        time_str = f"{h}s {mn:02d}d {sc:02d}sn"
+
+        slip_map = {r["idx"]: r for r in slip}
+
+        # ── CSS ───────────────────────────────────────────────────────────────
+        css = """
+body  { font-family: Arial, sans-serif; font-size: 10pt; color: #1a1a1a;
+        margin: 18px; }
+h1    { background: #2c3e50; color: #ffffff; padding: 10px 16px;
+        margin: 0 0 14px; font-size: 14pt; }
+h1 small { font-size: 8pt; font-weight: normal; }
+h2    { color: #2c3e50; border-bottom: 2px solid #3498db;
+        padding-bottom: 3px; margin: 14px 0 6px; font-size: 11pt; }
+table { width: 100%; border-collapse: collapse; margin: 6px 0;
+        font-size: 9pt; }
+th    { background: #34495e; color: #ffffff; padding: 5px 8px;
+        text-align: left; }
+td    { padding: 4px 8px; border-bottom: 1px solid #e0e0e0; }
+.even td { background: #f5f5f5; }
+.ok   { color: #27ae60; font-weight: bold; }
+.uyari{ color: #e67e22; font-weight: bold; }
+.kritik { color: #e74c3c; font-weight: bold; }
+.summary { background: #ecf0f1; border-left: 4px solid #3498db;
+           padding: 7px 12px; margin: 8px 0; }
+.total-row td { font-weight: bold; background: #dde8f4; }
+.footer { margin-top: 20px; font-size: 8pt; color: #95a5a6;
+          border-top: 1px solid #cccccc; padding-top: 6px; }
+"""
+
+        # ── Proje özet tablosu ────────────────────────────────────────────────
+        kubbe_str = f"{H_mm:.1f} mm" if H_mm > 0 else "Yok (saf silindir)"
+        proj_rows = f"""
+<tr><td>Dış çap (D)</td><td><b>{D_mm:.1f} mm</b></td>
+    <td>Operasyon basıncı</td><td><b>{P:.2f} MPa</b></td></tr>
+<tr class="even"><td>Mandrel uzunluğu (L)</td><td><b>{L_mm:.1f} mm</b></td>
+    <td>Kubbe yüksekliği (H)</td><td><b>{kubbe_str}</b></td></tr>
+<tr><td>Malzeme</td><td colspan="3"><b>{self._material_key}</b></td></tr>
+<tr class="even"><td>Fiber tex</td><td><b>{cost.get('tex', 800.0):.0f} tex (g/km)</b></td>
+    <td>Fiber hacim oranı Vf</td><td><b>{self._vf_spin.value():.3f}</b></td></tr>
+"""
+
+        # ── Katman tablosu ────────────────────────────────────────────────────
+        layer_rows_html = ""
+        for i, row in enumerate(breakdown):
+            idx = row.get("idx", i)
+            sr  = slip_map.get(idx, {})
+            verdict = sr.get("verdict", "")
+            verdict_cls   = {"ok": "ok", "uyari": "uyari", "kritik": "kritik"}.get(verdict, "")
+            verdict_label = {"ok": "OK", "uyari": "UYARI", "kritik": "KRİTİK"}.get(verdict, "—")
+            t_s_layer = row.get("time_s", 0.0)
+            t_m_layer = t_s_layer / 60.0
+            row_cls = "even" if i % 2 == 1 else ""
+            layer_rows_html += (
+                f'<tr class="{row_cls}">'
+                f"<td>{idx+1}</td>"
+                f"<td>{row.get('etiket','')}</td>"
+                f"<td>{row.get('tip_tr','')}</td>"
+                f"<td style='text-align:center'>{row.get('alpha_deg',0):+.1f}°</td>"
+                f"<td style='text-align:center'>{row.get('n_circuits',0)}</td>"
+                f"<td style='text-align:right'>{row.get('fiber_m',0):.1f} m</td>"
+                f"<td style='text-align:right'>{t_m_layer:.1f} dak</td>"
+                f"<td style='text-align:right'>{row.get('m_fiber_kg',0):.4f} kg</td>"
+                f"<td style='text-align:right'>${row.get('fiber_usd',0):.2f}</td>"
+                f'<td class="{verdict_cls}" style="text-align:center">{verdict_label}</td>'
+                f"</tr>\n"
+            )
+
+        # ── Finansal özet tablosu ─────────────────────────────────────────────
+        ovh_pct = cost.get("overhead_pct", 20.0)
+        fin_rows = f"""
+<tr><td>Fiber maliyeti</td><td style='text-align:right'>
+    ${cost.get('fiber_usd',0):.2f}</td>
+    <td>Fiber kütlesi</td><td style='text-align:right'>
+    {cost.get('m_fiber_kg',0):.3f} kg</td></tr>
+<tr class="even"><td>Reçine maliyeti</td><td style='text-align:right'>
+    ${cost.get('resin_usd',0):.2f}</td>
+    <td>Reçine kütlesi</td><td style='text-align:right'>
+    {cost.get('m_resin_kg',0):.3f} kg</td></tr>
+<tr><td>İşçilik maliyeti</td><td style='text-align:right'>
+    ${cost.get('labor_usd',0):.2f}</td>
+    <td>Toplam parça kütlesi</td><td style='text-align:right'>
+    {cost.get('m_total_kg',0):.3f} kg</td></tr>
+<tr class="even"><td>Genel gider (%{ovh_pct:.0f})</td><td style='text-align:right'>
+    ${cost.get('overhead_usd',0):.2f}</td>
+    <td>Toplam fiber uzunluğu</td><td style='text-align:right'>
+    {cost.get('total_fiber_m',0):.1f} m</td></tr>
+<tr class="total-row"><td colspan="2">Toplam Maliyet</td>
+    <td colspan="2" style='text-align:right; font-size:12pt'>
+    <b>${cost.get('total_usd',0):.2f}</b></td></tr>
+"""
+
+        # ── Kayma özet ────────────────────────────────────────────────────────
+        n_warn    = sum(1 for r in slip if r.get("verdict") == "uyari")
+        n_kritik  = sum(1 for r in slip if r.get("verdict") == "kritik")
+        if n_kritik > 0:
+            slip_summary = (f'<span class="kritik">⚠ {n_kritik} KRİTİK katman — '
+                            f'derhal gözden geçirin!</span>')
+        elif n_warn > 0:
+            slip_summary = (f'<span class="uyari">⚠ {n_warn} uyarı — '
+                            f'katman açılarını kontrol edin.</span>')
+        else:
+            slip_summary = '<span class="ok">✓ Tüm katmanlar kayma açısından güvenli.</span>'
+
+        # ── Makine profili ────────────────────────────────────────────────────
+        prof = self._get_active_profile()
+        mach_info = (f"{prof.isim} | {prof.kontrolor_tipi.upper()} | "
+                     f"Max X={prof.max_x_ilerleme_mm_dak:.0f} mm/dak | "
+                     f"Max A={prof.max_a_rpm:.0f} RPM")
+
+        html = f"""<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<title>Mühendislik Üretim Reçetesi — {now}</title>
+<style>{css}</style>
+</head>
+<body>
+<h1>Mühendislik Üretim Reçetesi
+<br><small>Filament Sarma CAM Platformu &nbsp;|&nbsp; {now}</small>
+</h1>
+
+<h2>Proje Özet Bilgileri</h2>
+<table>
+<tr><th>Parametre</th><th>Değer</th><th>Parametre</th><th>Değer</th></tr>
+{proj_rows}
+</table>
+
+<h2>Makine Profili</h2>
+<div class="summary">{mach_info}</div>
+
+<h2>Katman Katman Tasarım Tablosu</h2>
+<table>
+<tr>
+  <th>#</th><th>Etiket</th><th>Tür</th><th>Açı (°)</th><th>Devre</th>
+  <th>Fiber (m)</th><th>Süre (dak)</th><th>Fiber Kütlesi</th>
+  <th>Fiber Maliyeti</th><th>Kayma Durumu</th>
+</tr>
+{layer_rows_html}
+</table>
+<div class="summary">Kayma Analizi: {slip_summary}</div>
+
+<h2>Finansal ve Süre Özeti</h2>
+<table>
+<tr><th>Maliyet Kalemi</th><th>Tutar</th><th>Malzeme / Süre</th><th>Miktar</th></tr>
+{fin_rows}
+</table>
+<div class="summary">
+  Toplam Sarma Süresi: <b>{time_str}</b>
+  &nbsp;&nbsp;|&nbsp;&nbsp;
+  Toplam Fiber: <b>{cost.get('total_fiber_m',0):.1f} m</b>
+  &nbsp;&nbsp;|&nbsp;&nbsp;
+  Makine: {prof.isim}
+</div>
+
+<div class="footer">
+Oluşturan: Filament Sarma CAM Platformu &nbsp;|&nbsp;
+Tarih: {now} &nbsp;|&nbsp;
+Katman sayısı: {len(layers)} &nbsp;|&nbsp;
+Mandrel: D={D_mm:.0f}×L={L_mm:.0f} mm
+</div>
+</body>
+</html>"""
+        return html
+
+    # ── PDF kaydet ────────────────────────────────────────────────────────────
+
+    @Slot()
+    def _on_save_pdf(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "PDF Olarak Kaydet", "", "PDF Dosyası (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+
+        html = self._gen_html_report(preview_only=False)
+        try:
+            from PySide6.QtGui import QTextDocument
+            from PySide6.QtPrintSupport import QPrinter
+            from PySide6.QtGui import QPageSize
+
+            doc = QTextDocument()
+            doc.setHtml(html)
+
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(path)
+            try:
+                printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            except Exception:
+                pass
+            doc.print_(printer)
+            self._status_lbl.setText(f"PDF kaydedildi: {os.path.basename(path)}")
+        except ImportError:
+            # QtPrintSupport yoksa HTML dosyasına düş
+            html_path = path.replace(".pdf", "_rapor.html")
+            try:
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(html)
+                QMessageBox.information(
+                    self, "PDF Desteği Eksik",
+                    f"PySide6.QtPrintSupport bulunamadı.\n"
+                    f"HTML raporu kaydedildi:\n{html_path}")
+                self._status_lbl.setText(f"HTML kaydedildi: {os.path.basename(html_path)}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Kaydetme Hatası", str(exc))
+        except Exception as exc:
+            QMessageBox.critical(self, "PDF Hatası", str(exc))
 
     # ── Dış API ───────────────────────────────────────────────────────────────
 
