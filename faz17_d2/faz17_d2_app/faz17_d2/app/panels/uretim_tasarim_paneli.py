@@ -265,6 +265,7 @@ class UretimTasarimPaneli(QWidget):
 
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_AnalysisWorker] = None
+        self._pending_recalc: bool = False   # latest-wins: new data arrived while worker ran
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(self._DEBOUNCE_MS)
@@ -690,8 +691,11 @@ class UretimTasarimPaneli(QWidget):
 
     def _run_analysis(self):
         if self._worker_thread is not None and self._worker_thread.isRunning():
+            # Worker meşgul: en son snapshot'ı işaretle, biter bitmez yeniden çalış.
+            self._pending_recalc = True
             return
 
+        self._pending_recalc = False
         self._status_lbl.setText("Analiz çalışıyor…")
         mu   = self._mu_spin.value()
         fc   = self._fiber_cost.value()
@@ -717,10 +721,15 @@ class UretimTasarimPaneli(QWidget):
         self._update_cost_tab(result.get("cost", {}))
         self._update_export_preview()
         self._status_lbl.setText("Analiz tamamlandı.")
+        # latest-wins: worker çalışırken yeni veri geldiyse en güncel snapshot'la yeniden çalış.
+        if self._pending_recalc:
+            self._run_analysis()
 
     @Slot(str)
     def _on_analysis_error(self, msg: str):
         self._status_lbl.setText(f"Hata: {msg[:80]}")
+        # Hata durumunda da bekleyen yeniden hesaplamayı temizle.
+        self._pending_recalc = False
 
     # ── Kayma sekmesini güncelle ──────────────────────────────────────────────
 

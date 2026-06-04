@@ -328,22 +328,34 @@ class Winding3DPanel(QWidget):
         n_layers = getattr(self._params, 'n_layers', 4) if self._params else 4
 
         if mode == "Katman":
-            n_per_layer = n // max(n_layers, 1)
-            colors = np.zeros((n, 4), dtype=np.float32)
-            for i in range(n):
-                layer = min(n_layers - 1, i // max(n_per_layer, 1))
-                if self._highlighted_layer >= 0 and layer == self._highlighted_layer:
-                    colors[i] = [1.0, 1.0, 0.0, 1.0]  # bright yellow highlight
-                else:
-                    alpha = 0.3 if self._highlighted_layer >= 0 else 0.9
-                    r, g, b = _hsv_to_rgb(layer / max(n_layers, 1), 0.85, 1.0)
-                    colors[i] = [r, g, b, alpha]
+            # ── LUT yaklaşımı: Python döngüsü O(n_layers), NumPy indeksleme O(N) ──
+            # Her katman için bir kez _hsv_to_rgb çağrısı; kalan yük tamamen C'de.
+            dim_alpha = np.float32(0.3 if self._highlighted_layer >= 0 else 0.9)
+            lut = np.empty((n_layers, 4), dtype=np.float32)
+            for li in range(n_layers):
+                r, g, b = _hsv_to_rgb(li / max(n_layers, 1), 0.85, 1.0)
+                lut[li] = (r, g, b, dim_alpha)
+
+            # Her noktanın katman indeksi — tek vektör operasyonu
+            n_per = max(n // max(n_layers, 1), 1)
+            layer_of = np.minimum(np.arange(n, dtype=np.int32) // n_per, n_layers - 1)
+
+            # Fancy-index: (N,4) renk dizisi C hızında
+            colors = lut[layer_of]
+
+            # Vurgulama: ilgili satırları sarıya boya (boolean maske, O(N) C)
+            if self._highlighted_layer >= 0:
+                hi_mask = (layer_of == self._highlighted_layer)
+                colors[hi_mask] = (1.0, 1.0, 0.0, 1.0)
+
         elif mode == "Gerilim":
-            colors = np.zeros((n, 4), dtype=np.float32)
-            for i in range(n):
-                frac = i / max(n - 1, 1)
-                r, g, b = _hsv_to_rgb(0.33 * (1 - frac), 0.9, 1.0)
-                colors[i] = [r, g, b, 0.9]
+            # ── _hsv_to_rgb_v ile tamamen vektörize, np.select C katmanında ──
+            frac = np.linspace(0.0, 1.0, n, dtype=np.float32)
+            h_arr = np.float32(0.33) * (1.0 - frac)
+            rgb = _hsv_to_rgb_v(h_arr, s=0.9, v=1.0)           # (N,3)
+            alpha = np.full((n, 1), 0.9, dtype=np.float32)
+            colors = np.concatenate([rgb, alpha], axis=1)       # (N,4)
+
         else:
             colors = np.tile(np.array([0.4, 0.85, 0.7, 0.8], dtype=np.float32), (n, 1))
 
@@ -413,6 +425,7 @@ class Winding3DPanel(QWidget):
 
 
 def _hsv_to_rgb(h, s, v):
+    """Scalar HSV → (r,g,b). LUT inşası için korunur."""
     i = int(h * 6)
     f = h * 6 - i
     p = v * (1 - s)
@@ -425,3 +438,23 @@ def _hsv_to_rgb(h, s, v):
     if i == 3: return p, q, v
     if i == 4: return t, p, v
     return v, p, q
+
+
+def _hsv_to_rgb_v(h_arr: np.ndarray, s: float, v: float) -> np.ndarray:
+    """
+    Vektörize HSV → RGB.  h_arr: (N,) float32 [0,1]; s,v: scalar.
+    Döndürür: (N,3) float32.  np.select ile tüm dallar C katmanında işlenir.
+    """
+    h = np.asarray(h_arr, dtype=np.float32)
+    i6 = (h * 6).astype(np.int32) % 6
+    f  = (h * 6) - (h * 6).astype(np.int32)
+    p  = np.float32(v * (1.0 - s))
+    q  = (v * (1.0 - f * s)).astype(np.float32)
+    t  = (v * (1.0 - (1.0 - f) * s)).astype(np.float32)
+    vv = np.float32(v)
+
+    conds = [i6 == k for k in range(6)]
+    r = np.select(conds, [vv, q,  p,  p,  t,  vv], default=vv)
+    g = np.select(conds, [t,  vv, vv, q,  p,  p],  default=vv)
+    b = np.select(conds, [p,  p,  t,  vv, vv, q],  default=p)
+    return np.stack([r, g, b], axis=1).astype(np.float32)
