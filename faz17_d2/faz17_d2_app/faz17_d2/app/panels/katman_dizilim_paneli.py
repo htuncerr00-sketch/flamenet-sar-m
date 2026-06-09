@@ -534,6 +534,18 @@ class KatmanDizilimPaneli(QWidget):
 
         v.addStretch()
 
+        # Otomatik reçete önerici
+        btn_optimize = QPushButton("⚡ Otomatik Reçete Öner")
+        btn_optimize.setToolTip(
+            "Mandrel geometrisi + hedef kalınlık → en iyi katman dizilimini otomatik üret\n"
+            "(TaniqWind / CADWIND tarzı reçete optimizer)"
+        )
+        btn_optimize.setStyleSheet(_BTN_SEND)
+        btn_optimize.clicked.connect(self._on_optimize_recipe)
+        v.addWidget(btn_optimize)
+
+        v.addSpacing(4)
+
         # Üretim merkezine gönder
         btn_gonder = QPushButton("→ Üretime Gönder")
         btn_gonder.setToolTip(
@@ -903,11 +915,16 @@ class KatmanDizilimPaneli(QWidget):
         self._set_status(f"Bitiş katmanı eklendi: {spec.label}")
 
     def _on_move_up(self) -> None:
-        if not self._backend_ok:
-            self._set_status("Yeniden sıralama için backend gerekli.")
-            return
         row = self._table.currentRow()
         if row <= 0:
+            return
+        if not self._backend_ok:
+            # No-backend: swap rows in _ui_layers and in table
+            self._ui_layers[row], self._ui_layers[row - 1] = (
+                self._ui_layers[row - 1], self._ui_layers[row])
+            self._swap_table_rows(row, row - 1)
+            self._table.selectRow(row - 1)
+            self._schedule_autosend()
             return
         self._stack.move_layer(row, row - 1)
         self._refresh_table()
@@ -916,17 +933,42 @@ class KatmanDizilimPaneli(QWidget):
         self._emit_stack_changed()
 
     def _on_move_down(self) -> None:
-        if not self._backend_ok:
-            self._set_status("Yeniden sıralama için backend gerekli.")
-            return
         row = self._table.currentRow()
-        if row < 0 or row >= len(self._stack) - 1:
+        n_rows = self._table.rowCount()
+        if row < 0 or row >= n_rows - 1:
+            return
+        if not self._backend_ok:
+            self._ui_layers[row], self._ui_layers[row + 1] = (
+                self._ui_layers[row + 1], self._ui_layers[row])
+            self._swap_table_rows(row, row + 1)
+            self._table.selectRow(row + 1)
+            self._schedule_autosend()
             return
         self._stack.move_layer(row, row + 1)
         self._refresh_table()
         self._table.selectRow(row + 1)
         self._schedule_recalc()
         self._emit_stack_changed()
+
+    def _swap_table_rows(self, r1: int, r2: int) -> None:
+        """No-backend: iki tablo satırının içeriğini (widget hariç) yerinde değiştir."""
+        table = self._table
+        for col in range(table.columnCount()):
+            w1 = table.cellWidget(r1, col)
+            w2 = table.cellWidget(r2, col)
+            i1 = table.takeItem(r1, col)
+            i2 = table.takeItem(r2, col)
+            if w1 or w2:
+                # Widget içeren sütunlar için: sadece text/data swaplanır
+                if w1 and hasattr(w1, 'currentData') and w2 and hasattr(w2, 'currentData'):
+                    idx1, idx2 = w1.currentIndex(), w2.currentIndex()
+                    w1.setCurrentIndex(idx2)
+                    w2.setCurrentIndex(idx1)
+            else:
+                if i1:
+                    table.setItem(r2, col, i1)
+                if i2:
+                    table.setItem(r1, col, i2)
 
     def _on_delete(self) -> None:
         row = self._table.currentRow()
@@ -1543,6 +1585,308 @@ class KatmanDizilimPaneli(QWidget):
             self._refresh_table()
             self._schedule_recalc()
             self._emit_stack_changed()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Otomatik Reçete Önerici (recipe_optimizer entegrasyonu)
+    # ════════════════════════════════════════════════════════════════════════
+
+    def _on_optimize_recipe(self) -> None:
+        """Reçete optimizer dialog'unu aç."""
+        dlg = _RecipeOptimizerDialog(
+            mandrel_diameter_mm=self._mandrel_diameter_mm,
+            mandrel_length_mm=self._mandrel_length_mm,
+            parent=self,
+        )
+        if dlg.exec() and dlg.selected_recipe is not None:
+            self._load_optimized_recipe(dlg.selected_recipe)
+
+    def _load_optimized_recipe(self, recipe_dict: dict) -> None:
+        """Optimizörden gelen reçeteyi tabloya yükle."""
+        layers = recipe_dict.get("layers", [])
+        if not layers:
+            return
+
+        if self._backend_ok:
+            self._stack.clear()
+            for ld in layers:
+                try:
+                    ltype_str = ld.get("type", "helical")
+                    if ltype_str == "hoop":
+                        spec = self._stack.make_hoop(
+                            alpha_deg=float(ld.get("alpha_deg", 89.5)),
+                            fitil_genisligi_mm=float(ld.get("fitil_genisligi_mm", 6.0)),
+                        )
+                    elif ltype_str == "polar":
+                        spec = self._stack.make_polar(
+                            alpha_deg=float(ld.get("alpha_deg", 12.0)),
+                            fitil_genisligi_mm=float(ld.get("fitil_genisligi_mm", 4.0)),
+                        )
+                    else:
+                        spec = self._stack.make_helical(
+                            alpha_deg=float(ld.get("alpha_deg", 45.0)),
+                            fitil_genisligi_mm=float(ld.get("fitil_genisligi_mm", 6.0)),
+                        )
+                    self._stack.add_layer(spec)
+                except Exception:
+                    continue
+            self._refresh_table()
+            self._schedule_recalc()
+            self._emit_stack_changed()
+        else:
+            self._table.setRowCount(0)
+            self._ui_layers.clear()
+            for ld in layers:
+                ltype_str = ld.get("type", "helical")
+                alpha = float(ld.get("alpha_deg", 45.0))
+                self._insert_raw_row(
+                    ltype_str, alpha_deg=alpha,
+                    tow_w=float(ld.get("fitil_genisligi_mm", 6.0)),
+                )
+
+        n = self._table.rowCount() if not self._backend_ok else len(self._stack)
+        self._set_status(f"Optimizör reçetesi yüklendi: {n} katman.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Reçete Optimizer Dialog
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _RecipeOptimizerDialog:
+    """
+    Otomatik reçete önerici dialog'u.
+
+    Mandrel geometrisi + hedef kalınlık + malzeme parametreleriyle
+    optimize_recipe() çalıştırır; top-3 sonucu listeler.
+    Kullanıcı birini seçip "Yükle" diyince tabloya aktarılır.
+    """
+
+    def __init__(self, mandrel_diameter_mm: float = 200.0,
+                 mandrel_length_mm: float = 500.0, parent=None):
+        from PySide6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
+            QGroupBox, QDialogButtonBox, QTableWidget, QTableWidgetItem,
+            QHeaderView, QAbstractItemView, QProgressBar,
+        )
+        from PySide6.QtCore import Qt
+
+        self._parent = parent
+        self.selected_recipe: Optional[dict] = None
+        self._results = []
+
+        self._dlg = QDialog(parent)
+        self._dlg.setWindowTitle("⚡ Otomatik Reçete Önerici")
+        self._dlg.setMinimumSize(800, 580)
+        self._dlg.setStyleSheet(
+            f"QDialog {{ background: {COLOR['bg_window']}; color: {COLOR['text_primary']}; }}"
+        )
+
+        root = QVBoxLayout(self._dlg)
+        root.setSpacing(10)
+
+        # ── Girdi parametreleri ────────────────────────────────────────────
+        grp_in = QGroupBox("Tasarım Parametreleri")
+        grp_in.setStyleSheet(_GRP_STYLE)
+        fin = QFormLayout(grp_in)
+        fin.setLabelAlignment(Qt.AlignRight)
+        fin.setContentsMargins(10, 18, 10, 10)
+
+        self._d_spin = QDoubleSpinBox()
+        self._d_spin.setRange(10, 2000)
+        self._d_spin.setSuffix(" mm")
+        self._d_spin.setValue(mandrel_diameter_mm)
+        fin.addRow("Mandrel Çapı:", self._d_spin)
+
+        self._l_spin = QDoubleSpinBox()
+        self._l_spin.setRange(10, 5000)
+        self._l_spin.setSuffix(" mm")
+        self._l_spin.setValue(mandrel_length_mm)
+        fin.addRow("Mandrel Uzunluğu:", self._l_spin)
+
+        self._t_spin = QDoubleSpinBox()
+        self._t_spin.setRange(0.5, 50.0)
+        self._t_spin.setSuffix(" mm")
+        self._t_spin.setSingleStep(0.5)
+        self._t_spin.setValue(3.0)
+        fin.addRow("Hedef Et Kalınlığı:", self._t_spin)
+
+        self._mat_combo = QComboBox()
+        self._mat_combo.setStyleSheet(
+            f"QComboBox {{ background: {COLOR['bg_widget']}; "
+            f"color: {COLOR['text_primary']}; border: 1px solid {COLOR['border']}; }}"
+        )
+        self._mat_combo.addItem("T700/Epoxy (standart)", "t700_epoxy")
+        self._mat_combo.addItem("IM7/Epoxy (havacılık)", "im7_epoxy")
+        self._mat_combo.addItem("E-Cam/Epoxy (ekonomik)", "eglass_epoxy")
+        fin.addRow("Malzeme:", self._mat_combo)
+
+        root.addWidget(grp_in)
+
+        # ── Optimize butonu ────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        self._btn_run = QPushButton("🔍  Optimizasyonu Çalıştır")
+        self._btn_run.setStyleSheet(_BTN_SEND)
+        self._btn_run.clicked.connect(self._run)
+        btn_row.addStretch()
+        btn_row.addWidget(self._btn_run)
+        root.addLayout(btn_row)
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)
+        self._progress.setVisible(False)
+        self._progress.setFixedHeight(6)
+        self._progress.setStyleSheet(
+            f"QProgressBar {{ background: {COLOR['bg_widget']}; border: none; border-radius: 3px; }}"
+            f"QProgressBar::chunk {{ background: {COLOR['accent_bright']}; border-radius: 3px; }}"
+        )
+        root.addWidget(self._progress)
+
+        # ── Sonuç tablosu ──────────────────────────────────────────────────
+        grp_out = QGroupBox("Önerilen Reçeteler (Top 3)")
+        grp_out.setStyleSheet(_GRP_STYLE)
+        gv = QVBoxLayout(grp_out)
+        gv.setContentsMargins(8, 18, 8, 8)
+
+        self._result_table = QTableWidget(0, 7)
+        self._result_table.setHorizontalHeaderLabels([
+            "Sıra", "Aileleri", "Kalınlık", "Kapsama", "Süre", "Maliyet", "Skor"
+        ])
+        self._result_table.setStyleSheet(_TABLE_STYLE)
+        self._result_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._result_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._result_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._result_table.setAlternatingRowColors(True)
+        self._result_table.setMinimumHeight(140)
+        gv.addWidget(self._result_table)
+
+        self._status_lbl = QLabel("Parametreleri girin ve 'Optimizasyonu Çalıştır'a tıklayın.")
+        self._status_lbl.setStyleSheet(f"color: {COLOR['text_secondary']}; padding: 4px;")
+        gv.addWidget(self._status_lbl)
+
+        root.addWidget(grp_out, stretch=1)
+
+        # ── Alt butonlar ───────────────────────────────────────────────────
+        btn_box = QDialogButtonBox()
+        self._btn_load = btn_box.addButton("✓ Seçilen Reçeteyi Tabloya Yükle",
+                                           QDialogButtonBox.AcceptRole)
+        self._btn_load.setStyleSheet(_BTN_SEND)
+        self._btn_load.setEnabled(False)
+        btn_cancel = btn_box.addButton("İptal", QDialogButtonBox.RejectRole)
+        btn_cancel.setStyleSheet(_BTN_SECONDARY)
+        btn_box.accepted.connect(self._on_accept)
+        btn_box.rejected.connect(self._dlg.reject)
+        root.addWidget(btn_box)
+
+    def exec(self) -> bool:
+        return self._dlg.exec() == 1
+
+    def _run(self) -> None:
+        """Optimize et — ağır iş senkron (genellikle <1 s)."""
+        from PySide6.QtWidgets import QApplication
+        self._progress.setVisible(True)
+        self._btn_run.setEnabled(False)
+        self._result_table.setRowCount(0)
+        self._results.clear()
+        QApplication.processEvents()
+
+        try:
+            import sys as _sys
+            _sys.path.insert(0, "/home/user/flamenet-sar-m/faz17_d1/faz17_d1_backend")
+            from faz17_d1.core.recipe_optimizer import (
+                RecipeInput, RecipeConstraints, RecipeObjective, optimize_recipe,
+            )
+            from faz17_d1.core.geometry_engine import MandrelProfile
+            from faz17_d1.core.material_database import (
+                carbon_t700_standard_epoxy, carbon_im7_epoxy, eglass_epoxy,
+            )
+
+            mat_key = self._mat_combo.currentData()
+            if mat_key == "im7_epoxy":
+                mat = carbon_im7_epoxy()
+            elif mat_key == "eglass_epoxy":
+                mat = eglass_epoxy()
+            else:
+                mat = carbon_t700_standard_epoxy()
+
+            profile = MandrelProfile.cylinder(
+                self._l_spin.value(), self._d_spin.value() / 2.0)
+
+            constraints = RecipeConstraints(
+                target_thickness_mm=self._t_spin.value(),
+                thickness_tol_pct=15.0,
+                max_cycle_time_s=14400.0,
+                max_cost_usd=10000.0,
+                min_coverage_pct=90.0,
+            )
+            inp = RecipeInput(profile=profile, material=mat, constraints=constraints)
+            self._results = optimize_recipe(inp, top_k=3)
+            self._fill_table()
+            self._status_lbl.setText(
+                f"{len(self._results)} reçete bulundu. "
+                "Bir satır seçin ve 'Yükle' butonuna tıklayın."
+            )
+            self._btn_load.setEnabled(len(self._results) > 0)
+
+        except ImportError:
+            self._status_lbl.setText(
+                "Optimize edici yüklenemedi (material_database bulunamadı).")
+        except Exception as exc:
+            self._status_lbl.setText(f"Hata: {exc}")
+        finally:
+            self._progress.setVisible(False)
+            self._btn_run.setEnabled(True)
+
+    def _fill_table(self) -> None:
+        from PySide6.QtWidgets import QTableWidgetItem
+        from PySide6.QtCore import Qt
+
+        self._result_table.setRowCount(len(self._results))
+        for row, r in enumerate(self._results):
+            fam_str = " + ".join(
+                f"{f.alpha_deg:.0f}°×{f.n_layer_sets}"
+                for f in r.schedule.families
+            )
+            t_str   = f"{r.achieved_thickness_mm:.2f} mm"
+            cov_str = f"{r.coverage_pct:.0f} %"
+            time_s  = r.cycle.total_time_s
+            time_str = (f"{time_s/3600:.1f} sa" if time_s >= 3600
+                        else f"{time_s/60:.0f} dk")
+            cost_str = f"{r.cost.total_cost_usd:.0f} USD"
+            scr_str  = f"{r.score.combined:.3f}"
+
+            for col, val in enumerate([
+                f"#{r.rank}", fam_str, t_str, cov_str, time_str, cost_str, scr_str
+            ]):
+                item = QTableWidgetItem(val)
+                item.setTextAlignment(Qt.AlignCenter)
+                self._result_table.setItem(row, col, item)
+
+        if self._results:
+            self._result_table.selectRow(0)
+
+    def _on_accept(self) -> None:
+        row = self._result_table.currentRow()
+        if 0 <= row < len(self._results):
+            r = self._results[row]
+            # Convert to layer dict format understood by _load_optimized_recipe
+            layers = []
+            lid = 0
+            for fam in r.schedule.families:
+                for _ in range(fam.n_layer_sets):
+                    layers.append({
+                        "id": lid, "type": fam.strategy,
+                        "layer_type": fam.strategy,
+                        "alpha_deg": fam.alpha_deg,
+                        "fitil_genisligi_mm": 6.0,
+                        "cakisma_pct": fam.overlap_pct,
+                        "thickness_mm": r.achieved_thickness_mm / max(1, len(layers) + 1),
+                        "feed_mm_s": 80.0, "spindle_rpm": 60.0,
+                        "friction_mu": 0.3, "strategy": "geodesic",
+                        "label": f"{fam.strategy} {fam.alpha_deg:.0f}°",
+                        "notes": f"Optimizör #{r.rank}",
+                    })
+                    lid += 1
+            self.selected_recipe = {"versiyon": "1.0", "layers": layers}
+        self._dlg.accept()
 
 
 __all__ = ["KatmanDizilimPaneli"]
