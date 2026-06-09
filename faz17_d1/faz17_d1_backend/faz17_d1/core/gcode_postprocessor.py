@@ -15,15 +15,28 @@ from .path_generator import WindingPath
 
 @dataclass
 class MachineConfig:
-    """4-eksen filament sarma makinesi yapılandırması."""
+    """
+    4-eksen filament sarma makinesi yapılandırması.
+
+    Desteklenen kontrolörler
+    -----------------------
+    "grbl"     — GRBL v1.1 (Arduino/CNC Shield tabanlı); G0/G1, G21/G90, G28 (saklı ev)
+    "mach3"    — Mach3/Mach4 Windows CNC; G0/G1, M3/M5, % başlık opsiyonel
+    "fanuc"    — Fanuc 0i/21i/30i; G00/G01, %, O-numarası, N satır numaraları gerekli
+    "linuxcnc" — LinuxCNC/EMC2; NIST RS-274 standart; G0/G1, % isteğe bağlı, M2 sonlandırır
+    "siemens"  — Siemens SINUMERIK 840D; G0/G1, M30, satır numarasız
+    "custom"   — Satır numarası yok, minimal başlık
+    """
     x_axis: str = "X"
     a_axis: str = "A"
+    b_axis: str = ""               # Payout göz ekseni (boş = 3-eksen çıkış)
     max_x_feed_mm_min: float = 5000.0
     max_a_rpm: float = 300.0
     x_home_pos_mm: float = 0.0
     preheat_dwell_s: float = 0.0
     use_inch: bool = False
-    controller_type: str = "grbl"   # "grbl" | "mach3" | "fanuc" | "custom"
+    controller_type: str = "grbl"  # "grbl"|"mach3"|"fanuc"|"linuxcnc"|"siemens"|"custom"
+    program_number: int = 1        # Fanuc O-numarası (0 = devre dışı)
 
 
 @dataclass
@@ -50,104 +63,125 @@ def generate_gcode(segments: List[MotionSegment],
                    path: WindingPath,
                    config: MachineConfig) -> GCodeProgram:
     """
-    MotionSegment listesini G-code satırlarına dönüştür.
+    MotionSegment listesini makineye hazır G-code satırlarına dönüştür.
 
-    Çıktı formatı:
-    ; Filament Sarma CAM
-    G21            (mm modu)
-    G90            (mutlak koordinatlar)
-    G28            (referans noktası)
-    G1 X.. A.. F..
-    M30
+    Desteklenen formatlar:
+    - grbl/linuxcnc : G0/G1, satır numarasız, M2/M30 sonlandırır
+    - mach3         : G0/G1, M30 sonlandırır
+    - fanuc         : G00/G01, %, O-numarası, N satır numaraları, G04 dwell
+    - siemens       : G0/G1, G91/G90, M30 sonlandırır
+    - custom        : Minimal çıkış
     """
     prog = GCodeProgram()
     lines = prog.lines
     p = path.params
     cfg = config
 
+    is_fanuc    = cfg.controller_type == "fanuc"
+    is_siemens  = cfg.controller_type == "siemens"
+    is_linuxcnc = cfg.controller_type == "linuxcnc"
+    use_lnum    = is_fanuc   # N-satır numarası sadece Fanuc
+    lnum        = [10]       # mutable sayaç için liste
+
+    def _ln(cmd: str) -> str:
+        """Fanuc için N-prefix ekle; diğerleri düz döner."""
+        if use_lnum:
+            n = lnum[0]; lnum[0] += 10
+            return f"N{n:04d} {cmd}"
+        return cmd
+
+    rapid  = "G00" if is_fanuc else "G0"
+    linear = "G01" if is_fanuc else "G1"
+    dwell_g = "G04" if is_fanuc else "G4"
+
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # ── Program başlığı ───────────────────────────────────────────────────
+    if is_fanuc:
+        lines.append("%")
+        if cfg.program_number > 0:
+            lines.append(f"O{cfg.program_number:04d}")
+
     lines.append(f"; Filament Sarma CAM — {now}")
-    lines.append(f"; Mandrel: çap={p.profile.max_radius_mm * 2:.1f}mm "
+    lines.append(f"; Mandrel: çap={p.profile.max_radius_mm * 2:.1f}mm  "
                  f"uzunluk={p.profile.length_mm:.1f}mm")
     lines.append(f"; Sarma açısı: {p.alpha_deg:.1f}°  "
                  f"Strateji: {p.winding_strategy}")
-    lines.append(f"; Katmanlar: {path.n_layers}  "
-                 f"Devreler: {path.n_circuits}")
-    lines.append(f"; Fiber uzunluğu: {path.total_fiber_length_mm:.0f}mm  "
-                 f"Tahmini süre: {path.estimated_time_s:.0f}s")
-    lines.append(f"; Kapsama: {path.coverage_pct:.1f}%")
+    lines.append(f"; Katmanlar: {path.n_layers}  Devreler: {path.n_circuits}")
+    lines.append(f"; Fiber: {path.total_fiber_length_mm/1000:.2f}m  "
+                 f"Süre: {path.estimated_time_s:.0f}s  "
+                 f"Kapsama: {path.coverage_pct:.1f}%")
+    lines.append(f"; Clairaut c: {path.clairaut_c:.3f}mm")
     lines.append(f"; Kontrolör: {cfg.controller_type}")
     lines.append(";")
 
-    # Program başlangıç kodları
-    if cfg.use_inch:
-        lines.append("G20")
-    else:
-        lines.append("G21")
-    lines.append("G90")
+    # ── Başlatma kodları ──────────────────────────────────────────────────
+    lines.append(_ln("G20" if cfg.use_inch else "G21"))
+    lines.append(_ln("G90"))
 
-    if cfg.controller_type in ("grbl", "mach3"):
-        lines.append("G28")
-    elif cfg.controller_type == "fanuc":
-        lines.append("G28 G91 Z0")
-        lines.append("G90")
+    if is_fanuc:
+        lines.append(_ln("G28 G91 Z0"))
+        lines.append(_ln("G90"))
+    elif is_siemens:
+        lines.append(_ln("G90"))
+    elif cfg.controller_type in ("grbl", "mach3"):
+        lines.append(_ln("G28"))
+    elif is_linuxcnc:
+        lines.append(_ln("G28"))
 
     if cfg.preheat_dwell_s > 0:
         dwell_ms = int(cfg.preheat_dwell_s * 1000)
-        if cfg.controller_type == "fanuc":
-            lines.append(f"G04 P{dwell_ms}")
-        else:
-            lines.append(f"G4 P{dwell_ms}")
+        lines.append(_ln(f"{dwell_g} P{dwell_ms}"))
 
-    # Başlangıç konumuna git
-    if cfg.controller_type == "fanuc":
-        lines.append(f"G00 {cfg.x_axis}0.000")
-    else:
-        lines.append(f"G0 {cfg.x_axis}0.000")
+    lines.append(_ln(f"{rapid} {cfg.x_axis}0.000"))
 
-    # Hareket segmentleri
+    # ── Hareket segmentleri ───────────────────────────────────────────────
     total_dist = 0.0
     prev_feed = -1.0
+    b_has_data = cfg.b_axis and any(
+        hasattr(s, "b_deg") for s in segments
+    )
 
     for seg in segments:
+        b_part = ""
+        if b_has_data and hasattr(seg, "b_deg"):
+            b_part = f" {cfg.b_axis}{seg.b_deg:.2f}"
+
         if seg.segment_type == "RAPID":
-            rapid_cmd = "G00" if cfg.controller_type == "fanuc" else "G0"
-            lines.append(
-                f"{rapid_cmd} {cfg.x_axis}{seg.x_end:.3f} "
-                f"{cfg.a_axis}{seg.a_end:.3f}"
-            )
+            lines.append(_ln(
+                f"{rapid} {cfg.x_axis}{seg.x_end:.3f} "
+                f"{cfg.a_axis}{seg.a_end:.3f}{b_part}"
+            ))
             continue
         if seg.segment_type == "DWELL":
             dwell_val = int(seg.feed_mm_min)
-            if cfg.controller_type == "fanuc":
-                lines.append(f"G04 P{dwell_val}")
-            else:
-                lines.append(f"G4 P{dwell_val}")
+            lines.append(_ln(f"{dwell_g} P{dwell_val}"))
             continue
 
-        # LINEAR hareket
+        # LINEAR
         feed = min(seg.feed_mm_min, cfg.max_x_feed_mm_min)
-        linear_cmd = "G01" if cfg.controller_type == "fanuc" else "G1"
-
         dx = abs(seg.x_end - seg.x_start)
-        da = abs(seg.a_end - seg.a_start)
         total_dist += dx
 
         if abs(feed - prev_feed) > 0.5:
-            lines.append(
-                f"{linear_cmd} {cfg.x_axis}{seg.x_end:.3f} "
-                f"{cfg.a_axis}{seg.a_end:.3f} F{feed:.0f}"
-            )
+            lines.append(_ln(
+                f"{linear} {cfg.x_axis}{seg.x_end:.3f} "
+                f"{cfg.a_axis}{seg.a_end:.3f}{b_part} F{feed:.0f}"
+            ))
             prev_feed = feed
         else:
-            lines.append(
-                f"{linear_cmd} {cfg.x_axis}{seg.x_end:.3f} "
-                f"{cfg.a_axis}{seg.a_end:.3f}"
-            )
+            lines.append(_ln(
+                f"{linear} {cfg.x_axis}{seg.x_end:.3f} "
+                f"{cfg.a_axis}{seg.a_end:.3f}{b_part}"
+            ))
 
-    # Program sonu
+    # ── Program sonu ──────────────────────────────────────────────────────
     lines.append(f"; Toplam X hareketi: {total_dist:.0f}mm")
-    lines.append("M30")
+    end_cmd = "M30" if not is_linuxcnc else "M2"
+    lines.append(_ln(end_cmd))
+
+    if is_fanuc:
+        lines.append("%")
 
     prog.n_circuits = path.n_circuits
     prog.n_layers = path.n_layers

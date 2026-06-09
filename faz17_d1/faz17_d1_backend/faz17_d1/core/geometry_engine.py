@@ -110,6 +110,50 @@ class MandrelProfile:
             r_profile = np.interp(z_bins, z_bins[nz], r_profile[nz])
         return cls(z_bins, r_profile)
 
+    @classmethod
+    def ellipsoidal_dome_cylinder_dome(
+        cls,
+        cyl_length_mm: float,
+        cyl_radius_mm: float,
+        dome_hr_ratio: float = 1.0,
+        n_points: int = 500,
+    ) -> 'MandrelProfile':
+        """
+        Elipsoidal kapaklar + silindirik gövde — silindir kavşağında sürekli.
+
+        dome_hr_ratio = kubbe_yüksekliği / silindir_yarıçapı
+          1.0 → yarı küre  (hemispherical)
+          0.5 → basık elipsoid  (ASME basınçlı kap profili)
+          0.707 → Netting analizi optimumu
+
+        Profil: r(z) = R · √(1 − ((H−z)/H)²)  ⟹  kavşakta her zaman r=R
+        """
+        R = float(cyl_radius_mm)
+        H = R * float(dome_hr_ratio)
+        if H <= 0:
+            H = R * 0.01
+        L = float(cyl_length_mm)
+        n3 = n_points // 3
+        rem = n_points - 2 * n3
+
+        # Sol kubbe: z ∈ [0, H], kutup z=0'da (r=0), ekvator z=H'de (r=R)
+        z_dl = np.linspace(0.0, H, n3)
+        r_dl = R * np.sqrt(np.maximum(0.0, 1.0 - ((H - z_dl) / H) ** 2))
+
+        # Silindir: z ∈ [H, H+L]
+        z_cy = np.linspace(H, H + L, n3)
+        r_cy = np.full(n3, R)
+
+        # Sağ kubbe: z ∈ [H+L, 2H+L], ekvator z=H+L'de, kutup z=2H+L'de
+        z_dr_loc = np.linspace(0.0, H, rem)
+        r_dr = R * np.sqrt(np.maximum(0.0, 1.0 - (z_dr_loc / H) ** 2))
+        z_dr = (H + L) + z_dr_loc
+
+        z = np.concatenate([z_dl, z_cy, z_dr])
+        r = np.concatenate([r_dl, r_cy, r_dr])
+        r = np.maximum(r, R * 0.005)   # kutup ucunu sıfıra bırakma
+        return cls(z, r)
+
     # ── Geometri sorgu yöntemleri ──────────────────────────────────────────
 
     def radius_at(self, z_mm: float) -> float:
@@ -136,6 +180,11 @@ class MandrelProfile:
     @property
     def max_radius_mm(self) -> float:
         return float(self.r_mm.max())
+
+    @property
+    def min_radius_mm(self) -> float:
+        """Profildeki minimum yarıçap (mm) — kubbe açıklığı (boss) tahmini."""
+        return float(self.r_mm.min())
 
     @property
     def avg_radius_mm(self) -> float:

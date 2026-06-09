@@ -16,6 +16,7 @@ from faz17_d1.core.geometry_engine import MandrelProfile
 from faz17_d1.core.path_generator import (
     WindingPathParams, WindingPath, generate_path,
     generate_hoop_path, generate_polar_path,
+    clairaut_circuit_count, find_turnaround_z_left, find_turnaround_z_right,
 )
 from faz17_d1.core.motion_planner import MotionSegment, plan_motion
 from faz17_d1.core.gcode_postprocessor import MachineConfig, GCodeProgram, generate_gcode
@@ -242,6 +243,143 @@ def test_legacy_invalid_params():
         _assert(True, "legacy: geçersiz parametre ValueError fırlattı")
 
 
+# ── Elipsoidal kubbe profili ──────────────────────────────────────────────────
+
+def test_ellipsoidal_dome_cylinder_dome():
+    p = MandrelProfile.ellipsoidal_dome_cylinder_dome(200.0, 50.0, dome_hr_ratio=0.7)
+    _assert(p.max_radius_mm >= 49.9, "ellips_dome: maks yarıçap ~50mm")
+    _assert(p.min_radius_mm < 5.0, "ellips_dome: kutup yarıçapı küçük")
+    _assert(p.length_mm > 200.0, "ellips_dome: toplam uzunluk > silindir uzunluğu")
+    # Kavşak sürekliliği: z=dome_height'ta r≈R
+    H = 50.0 * 0.7
+    r_at_junction = p.radius_at(H)
+    _assert(abs(r_at_junction - 50.0) < 1.0, "ellips_dome: kavşakta r≈50mm")
+
+
+def test_ellipsoidal_hemisphere():
+    p = MandrelProfile.ellipsoidal_dome_cylinder_dome(100.0, 40.0, dome_hr_ratio=1.0)
+    # dome_hr_ratio=1 → yarı küre, H=R=40mm
+    r_at_equator = p.radius_at(40.0)
+    _assert(abs(r_at_equator - 40.0) < 1.0, "ellips_hemisphere: kavşakta r≈R")
+
+
+def test_min_radius_mm():
+    cyl = MandrelProfile.cylinder(100.0, 30.0)
+    _assert(abs(cyl.min_radius_mm - 30.0) < 0.1, "min_radius_mm: silindir")
+    dome = MandrelProfile.ellipsoidal_dome_cylinder_dome(100.0, 30.0, 0.5)
+    _assert(dome.min_radius_mm < 5.0, "min_radius_mm: kubbe ucu küçük")
+
+
+# ── Kubbe dönüş noktası ───────────────────────────────────────────────────────
+
+def test_turnaround_cylinder():
+    """Silindir için tüm profil erişilebilir → dönüm noktaları profil uçlarında."""
+    p = MandrelProfile.cylinder(300.0, 50.0)
+    c = 50.0 * math.sin(math.radians(55.0))  # < 50 → tüm profil erişilebilir
+    z_left  = find_turnaround_z_left(p, c)
+    z_right = find_turnaround_z_right(p, c)
+    _assert(abs(z_left - 0.0) < 0.1, "turnaround_cyl: sol dönüm z=0'da")
+    _assert(abs(z_right - 300.0) < 0.1, "turnaround_cyl: sağ dönüm z=L'de")
+
+
+def test_turnaround_dome():
+    """Kubbe profili: dönüm noktaları silindir iç kısmında olmalı."""
+    p = MandrelProfile.ellipsoidal_dome_cylinder_dome(200.0, 50.0, 0.7)
+    alpha_rad = math.radians(55.0)
+    c = 50.0 * math.sin(alpha_rad)  # ≈ 40.96mm
+    z_left  = find_turnaround_z_left(p, c)
+    z_right = find_turnaround_z_right(p, c)
+    H = 50.0 * 0.7   # dome height = 35mm
+    total_L = p.length_mm
+    _assert(z_left > 0.0, "turnaround_dome: sol dönüm profil başından sonra")
+    _assert(z_left < H + 5.0, "turnaround_dome: sol dönüm kubbe bölgesinde")
+    _assert(z_right < total_L, "turnaround_dome: sağ dönüm profil sonundan önce")
+    _assert(z_right > total_L - H - 5.0, "turnaround_dome: sağ dönüm sağ kubbe bölgesinde")
+
+
+# ── Devre sayısı formülü ──────────────────────────────────────────────────────
+
+def test_clairaut_circuit_count_cylinder():
+    """N = ceil(2π·R·sin(α)/w) — araştırma doğrulamalı formül."""
+    R, alpha_deg, w = 50.0, 55.0, 5.0
+    alpha_rad = math.radians(alpha_deg)
+    n = clairaut_circuit_count(R, alpha_rad, w, overlap_pct=0.0)
+    n_ideal = 2 * math.pi * R * math.sin(alpha_rad) / w
+    _assert(n >= math.ceil(n_ideal) - 1, "circuit_count: alt sınır tutarlı")
+    _assert(n <= math.ceil(n_ideal) + 1, "circuit_count: üst sınır tutarlı")
+    _assert(n < 100, "circuit_count: aşırı büyük değil (sin faktörü çalışıyor)")
+
+
+def test_clairaut_circuit_count_less_than_circumferential():
+    """sin(α) faktörüyle devre sayısı eskiden büyük değerden az olmalı."""
+    R, alpha_deg, w = 50.0, 55.0, 5.0
+    alpha_rad = math.radians(alpha_deg)
+    n_new = clairaut_circuit_count(R, alpha_rad, w, overlap_pct=0.0)
+    n_old = math.ceil(2.0 * math.pi * R / w)   # eski formül (sin yoktu)
+    _assert(n_new <= n_old, f"circuit_count: yeni({n_new}) ≤ eski({n_old})")
+
+
+# ── Kubbe sarma yolu ──────────────────────────────────────────────────────────
+
+def test_path_dome_turnaround():
+    """Kubbe profil sarma: tüm noktalar r ≥ c koşulunu sağlamalı."""
+    profile = MandrelProfile.ellipsoidal_dome_cylinder_dome(100.0, 40.0, 0.7)
+    params = WindingPathParams(
+        profile=profile, alpha_deg=55.0, n_layers=1,
+        tow_width_mm=5.0, n_steps_per_pass=30,
+    )
+    path = generate_path(params)
+    alpha_rad = math.radians(params.alpha_deg)
+    c = profile.max_radius_mm * math.sin(alpha_rad)
+    violations = sum(
+        1 for pt in path.points
+        if profile.radius_at(pt.x_mm) < c - 2.0   # 2mm tolerans
+    )
+    _assert(violations == 0,
+            f"dome_turnaround: r < c ihlali yok (c={c:.1f}mm) — ihlal={violations}")
+
+
+# ── Fanuc G-code formatı ──────────────────────────────────────────────────────
+
+def test_fanuc_percent_markers():
+    """Fanuc G-code'u % başlık ve sonlandırıcıyla açılmalı/kapanmalı."""
+    profile = MandrelProfile.cylinder(100.0, 30.0)
+    params  = WindingPathParams(profile=profile, alpha_deg=55.0, n_layers=1, n_steps_per_pass=20)
+    path    = generate_path(params)
+    segs    = plan_motion(path)
+    cfg     = MachineConfig(controller_type="fanuc", program_number=42)
+    gp      = generate_gcode(segs, path, cfg)
+    lines   = gp.lines
+    _assert(lines[0] == "%", "fanuc: ilk satır '%'")
+    _assert(lines[-1] == "%", "fanuc: son satır '%'")
+    _assert(any("O0042" in l for l in lines), "fanuc: O-numarası O0042 mevcut")
+
+
+def test_fanuc_line_numbers():
+    """Fanuc G-code satırları N-prefix içermeli."""
+    profile = MandrelProfile.cylinder(100.0, 30.0)
+    params  = WindingPathParams(profile=profile, alpha_deg=55.0, n_layers=1, n_steps_per_pass=10)
+    path    = generate_path(params)
+    segs    = plan_motion(path)
+    cfg     = MachineConfig(controller_type="fanuc")
+    gp      = generate_gcode(segs, path, cfg)
+    n_prefixed = sum(1 for l in gp.lines if l.startswith("N") and len(l) > 4)
+    _assert(n_prefixed > 3, f"fanuc: N-prefixli satır sayısı > 3 ({n_prefixed})")
+
+
+def test_linuxcnc_m2_end():
+    """LinuxCNC G-code'u M2 ile bitmeli (M30 değil)."""
+    profile = MandrelProfile.cylinder(100.0, 30.0)
+    params  = WindingPathParams(profile=profile, alpha_deg=55.0, n_layers=1, n_steps_per_pass=10)
+    path    = generate_path(params)
+    segs    = plan_motion(path)
+    cfg     = MachineConfig(controller_type="linuxcnc")
+    gp      = generate_gcode(segs, path, cfg)
+    text    = gp.as_text()
+    _assert("M2" in text, "linuxcnc: M2 mevcut")
+    _assert("M30" not in text, "linuxcnc: M30 yok")
+
+
 # ── Özet ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -265,6 +403,18 @@ def main():
     test_gcode_statistics()
     test_legacy_generate_helical()
     test_legacy_invalid_params()
+    # Yeni testler (Faz 11+)
+    test_ellipsoidal_dome_cylinder_dome()
+    test_ellipsoidal_hemisphere()
+    test_min_radius_mm()
+    test_turnaround_cylinder()
+    test_turnaround_dome()
+    test_clairaut_circuit_count_cylinder()
+    test_clairaut_circuit_count_less_than_circumferential()
+    test_path_dome_turnaround()
+    test_fanuc_percent_markers()
+    test_fanuc_line_numbers()
+    test_linuxcnc_m2_end()
 
     total = PASS + FAIL
     print(f"\n{'─' * 40}")
