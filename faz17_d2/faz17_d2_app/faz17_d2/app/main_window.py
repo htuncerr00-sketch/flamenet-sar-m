@@ -43,6 +43,7 @@ from app.panels.malzeme_kutuphanesi import MalzemeKutuphanesiPanel
 from app.panels.tabaka_yoneticisi import TabakaYoneticisiPanel
 from app.panels.katman_dizilim_paneli import KatmanDizilimPaneli
 from app.panels.uretim_tasarim_paneli import UretimTasarimPaneli
+from app.panels.entegre_tasarim_paneli import EntegreTasarimPaneli
 from app.link_factory import LinkConfig, make_link
 from app.engine.production_engine import ProductionEngine, ProductionState
 
@@ -141,6 +142,7 @@ class FilamentWindingApp(QMainWindow):
         self._panel_tabaka   = TabakaYoneticisiPanel()
         self._panel_katman   = KatmanDizilimPaneli()
         self._panel_uretim   = UretimTasarimPaneli()
+        self._panel_entegre  = EntegreTasarimPaneli()
         self._panel_cam      = CAMPanel()
         self._panel_live     = LiveProductionPanel()
         self._panel_3d       = Winding3DPanel()
@@ -156,6 +158,7 @@ class FilamentWindingApp(QMainWindow):
         self._tabs.addTab(self._panel_malzeme, "Malzeme Kütüphanesi")
         self._tabs.addTab(self._panel_tabaka,  "Katman & Analiz")
         self._tabs.addTab(self._panel_katman,  "Manuel Dizilim")
+        self._tabs.addTab(self._panel_entegre, "🏭 Tasarım Merkezi")
         self._tabs.addTab(self._panel_uretim,  "Üretim Tasarım Merkezi")
         self._tabs.addTab(self._panel_cam,     "CAM Üretici")
         # ── Üretim & izleme sekmeleri ───────────────────────────────────────
@@ -286,11 +289,13 @@ class FilamentWindingApp(QMainWindow):
             self._panel_3d.highlight_layer)
         self._panel_katman.kaymaUyarisi.connect(
             self._on_kayma_uyarisi)
-        # "→ Üretime Gönder" butonu → üretim merkezi + CAM
+        # "→ Üretime Gönder" butonu → üretim merkezi + CAM + entegre panel
         self._panel_katman.uretimeGonder.connect(
             self._panel_uretim.set_layer_stack)
         self._panel_katman.uretimeGonder.connect(
             self._panel_cam.set_layer_stack)
+        self._panel_katman.uretimeGonder.connect(
+            self._panel_entegre.set_layer_stack)
 
         # Üretim tasarım merkezi → eksen limit uyarısı → alarmlar
         self._panel_uretim.eksenSinirUyarisi.connect(
