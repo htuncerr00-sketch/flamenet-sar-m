@@ -585,7 +585,7 @@ class EntegreTasarimPaneli(QWidget):
 
         self._cb_type = QComboBox()
         self._cb_type.setStyleSheet(_S_COMBO)
-        for t in ["Silindir", "Konik", "Kubbeli Silindir", "STL'den"]:
+        for t in ["Silindir", "Konik", "Kubbeli Silindir", "Elipsoidal Kubbe", "STL'den"]:
             self._cb_type.addItem(t)
         self._cb_type.currentIndexChanged.connect(self._on_mandrel_type_changed)
         fm.addRow("Tip:", self._cb_type)
@@ -619,6 +619,14 @@ class EntegreTasarimPaneli(QWidget):
         self._sp_dome.setVisible(False)
         self._sp_dome_lbl = QLabel("Kubbe Yük.:")
         fm.addRow(self._sp_dome_lbl, self._sp_dome)
+
+        self._sp_dome_hr = QDoubleSpinBox()
+        self._sp_dome_hr.setRange(0.1, 2.0); self._sp_dome_hr.setValue(0.7)
+        self._sp_dome_hr.setSuffix(""); self._sp_dome_hr.setDecimals(2)
+        self._sp_dome_hr.setStyleSheet(_S_SPIN)
+        self._sp_dome_hr.setVisible(False)
+        self._sp_dome_hr_lbl = QLabel("Kubbe H/R:")
+        fm.addRow(self._sp_dome_hr_lbl, self._sp_dome_hr)
 
         self._btn_stl = QPushButton("📂 STL Yükle")
         self._btn_stl.setStyleSheet(_S_BTN_PRI)
@@ -680,6 +688,16 @@ class EntegreTasarimPaneli(QWidget):
         self._sp_rpm.setSuffix(" RPM"); self._sp_rpm.setDecimals(1)
         self._sp_rpm.setStyleSheet(_S_SPIN)
         ff.addRow("İş Mili RPM:", self._sp_rpm)
+
+        self._sp_friction = QDoubleSpinBox()
+        self._sp_friction.setRange(0.0, 0.5); self._sp_friction.setValue(0.0)
+        self._sp_friction.setSuffix(""); self._sp_friction.setDecimals(3)
+        self._sp_friction.setToolTip(
+            "Sürtünme katsayısı μ\n"
+            "0 = geodezik (Clairaut)\n"
+            ">0 = non-geodezik (Koussios RK4)")
+        self._sp_friction.setStyleSheet(_S_SPIN)
+        ff.addRow("Sürtünme μ:", self._sp_friction)
 
         v.addWidget(grp_f)
 
@@ -843,14 +861,17 @@ class EntegreTasarimPaneli(QWidget):
 
     def _on_mandrel_type_changed(self) -> None:
         t = self._cb_type.currentText()
-        is_stl  = (t == "STL'den")
-        is_cone = (t == "Konik")
-        is_dome = (t == "Kubbeli Silindir")
+        is_stl   = (t == "STL'den")
+        is_cone  = (t == "Konik")
+        is_dome  = (t == "Kubbeli Silindir")
+        is_ellip = (t == "Elipsoidal Kubbe")
 
         self._sp_cone.setVisible(is_cone)
         self._sp_cone_lbl.setVisible(is_cone)
         self._sp_dome.setVisible(is_dome)
         self._sp_dome_lbl.setVisible(is_dome)
+        self._sp_dome_hr.setVisible(is_ellip)
+        self._sp_dome_hr_lbl.setVisible(is_ellip)
         self._btn_stl.setVisible(is_stl)
         self._lbl_stl.setVisible(is_stl)
         self._on_mandrel_changed()
@@ -983,6 +1004,9 @@ class EntegreTasarimPaneli(QWidget):
             profile = MandrelProfile.cone(l_mm, d_mm / 2.0, r_end)
         elif t == "Kubbeli Silindir":
             profile = MandrelProfile.dome_cylinder_dome(l_mm, d_mm / 2.0, dh)
+        elif t == "Elipsoidal Kubbe":
+            profile = MandrelProfile.ellipsoidal_dome_cylinder_dome(
+                l_mm, d_mm / 2.0, dome_hr_ratio=self._sp_dome_hr.value())
         else:
             if not self._stl_path:
                 raise RuntimeError("STL dosyası seçilmedi.")
@@ -1023,6 +1047,7 @@ class EntegreTasarimPaneli(QWidget):
                     feed_mm_s=self._sp_feed.value(),
                     spindle_rpm=self._sp_rpm.value(),
                     winding_strategy=strat,
+                    friction_mu=self._sp_friction.value(),
                 )
                 path = generate_path(pp)
                 all_paths.append(path)
@@ -1046,6 +1071,7 @@ class EntegreTasarimPaneli(QWidget):
                 feed_mm_s=self._sp_feed.value(),
                 spindle_rpm=self._sp_rpm.value(),
                 winding_strategy=strat,
+                friction_mu=self._sp_friction.value(),
             )
             path = generate_path(pp)
             return path, profile, None
