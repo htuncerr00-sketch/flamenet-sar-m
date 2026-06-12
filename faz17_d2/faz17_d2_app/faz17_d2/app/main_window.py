@@ -46,6 +46,7 @@ from app.panels.uretim_tasarim_paneli import UretimTasarimPaneli
 from app.panels.entegre_tasarim_paneli import EntegreTasarimPaneli
 from app.link_factory import LinkConfig, make_link
 from app.engine.production_engine import ProductionEngine, ProductionState
+from app.autosave_manager import AutoSaveManager, RecoveryWizard
 
 
 class FilamentWindingApp(QMainWindow):
@@ -109,6 +110,31 @@ class FilamentWindingApp(QMainWindow):
         self._build_ui()
         self._connect_signals()
         self._restore_layout()
+
+        # ── Sprint 3: Auto-save + crash recovery ────────────────────────────
+        self._autosave_mgr = AutoSaveManager(
+            data_provider=self._panel_proje._read_form,
+            dirty_provider=self._panel_proje.has_unsaved_changes,
+            parent=self,
+        )
+        self._panel_proje.set_autosave_manager(self._autosave_mgr)
+        # Her kirlilik/komut sinyali debounce sayacını besler
+        self._panel_proje.degisiklikDurumu.connect(
+            lambda dirty: dirty and self._autosave_mgr.notify_change())
+        self._undo_stack.indexChanged.connect(
+            lambda *_: self._autosave_mgr.notify_change())
+        # Çökme tespiti + oturum kilidi yalnızca etkileşimli modda —
+        # headless (test/CI) oturumları kullanıcı kilidine dokunmaz
+        if not headless:
+            if (self._autosave_mgr.has_stale_lock()
+                    and self._autosave_mgr.list_versions()):
+                wiz = RecoveryWizard(self._autosave_mgr, parent=self)
+                if wiz.exec() and wiz.selected_data is not None:
+                    self._panel_proje.load_project_dict(wiz.selected_data)
+                    # Kurtarılan durum diskteki .fwp ile farklı — kirli
+                    # işaretle (grace penceresine takılmasın diye doğrudan)
+                    self._panel_proje._mark_dirty()
+            self._autosave_mgr.acquire_lock()
 
         # Start systems
         self._twin.start()
@@ -832,6 +858,11 @@ class FilamentWindingApp(QMainWindow):
                     ev.ignore()
                     return
         try:
+            # Sprint 3: otomatik kayıt sayacını durdur, oturum kilidini
+            # kaldır (temiz kapanış = çökme yok)
+            if hasattr(self, "_autosave_mgr"):
+                self._autosave_mgr.stop()
+                self._autosave_mgr.release_lock()
             # Save layout
             self._save_layout()
             # Stop PM timer

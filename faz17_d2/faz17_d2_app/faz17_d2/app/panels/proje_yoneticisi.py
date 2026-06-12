@@ -173,6 +173,8 @@ class ProjeYoneticisiPanel(QWidget):
         # Kayıt sırasında katman verisi sağlayan callable'lar (MainWindow kurar)
         self._katman_provider: Optional[Callable[[], Dict[str, Any]]] = None
         self._entegre_provider: Optional[Callable[[], Dict[str, Any]]] = None
+        # Sprint 3: otomatik kayıt yöneticisi (MainWindow kurar)
+        self._autosave_mgr = None
         self._settings = QSettings("FilamentSarma", "ProjeYoneticisi")
         self._build_ui()
         self._load_recent_list()
@@ -258,6 +260,7 @@ class ProjeYoneticisiPanel(QWidget):
         self._build_bilgi_tab()
         self._build_mandrel_tab()
         self._build_ozet_tab()
+        self._build_history_tab()
 
         rl.addWidget(self._form_tabs)
         rl.addWidget(self._build_action_bar())
@@ -424,6 +427,57 @@ class ProjeYoneticisiPanel(QWidget):
         v.addWidget(btn_guncelle)
 
         self._form_tabs.addTab(w, "Özet")
+
+    def _build_history_tab(self) -> None:
+        """Sürüm Geçmişi sekmesi (Faz 25 Sprint 3 — Project History).
+
+        Otomatik kayıt sürümlerini zaman damgasıyla listeler; kullanıcı
+        eski bir sürüme dönebilir. Liste, autosave yöneticisi MainWindow
+        tarafından `set_autosave_manager()` ile kurulduğunda dolar.
+        """
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
+
+        lbl = QLabel("Otomatik Kayıt Sürümleri (en yeni üstte)")
+        lbl.setStyleSheet(_HDR_STYLE)
+        v.addWidget(lbl)
+
+        self._history_list = QListWidget()
+        self._history_list.setStyleSheet(
+            "QListWidget { background: #1A1A2E; color: #E8E8E8; "
+            "border: 1px solid #3A3A5C; }"
+            "QListWidget::item { padding: 5px; }"
+            "QListWidget::item:selected { background: #2A3A6A; }")
+        v.addWidget(self._history_list, stretch=1)
+
+        hb = QHBoxLayout()
+        btn_refresh = QPushButton("⟳ Yenile")
+        btn_refresh.setStyleSheet(
+            "QPushButton { background: #252540; color: #C0C0E0; "
+            "padding: 6px 12px; border: 1px solid #3A3A5C; "
+            "border-radius: 3px; }")
+        btn_refresh.clicked.connect(self.refresh_history)
+        hb.addWidget(btn_refresh)
+        hb.addStretch()
+
+        btn_revert = QPushButton("⤺ Bu Sürüme Dön")
+        btn_revert.setStyleSheet(
+            "QPushButton { background: #1A6B3C; color: white; "
+            "padding: 6px 14px; border: none; border-radius: 3px; "
+            "font-weight: bold; }"
+            "QPushButton:hover { background: #2A8B4C; }")
+        btn_revert.clicked.connect(self._on_revert_to_version)
+        hb.addWidget(btn_revert)
+        v.addLayout(hb)
+
+        self._history_hint = QLabel(
+            "Otomatik kayıt etkin değil — sürüm listesi boş.")
+        self._history_hint.setStyleSheet("color: #707070; font-size: 11px;")
+        v.addWidget(self._history_hint)
+
+        self._form_tabs.addTab(w, "Sürüm Geçmişi")
 
     def _build_action_bar(self) -> QWidget:
         w = QWidget()
@@ -693,19 +747,27 @@ class ProjeYoneticisiPanel(QWidget):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            # Zorunlu migrasyon: v1.0 dosyaları kayıpsız v2.0'a yükseltilir
-            self._proje = _migrate_project(data)
-            self._dosya_yolu = path
-            self._fill_form(self._proje)
+            self.load_project_dict(data, dosya_yolu=path)
             self._add_to_recent(path)
-            # Yüklenen projeyi panellere otomatik uygula — katman dizilimi
-            # dahil tüm tasarım verisi geri yüklenir
-            self.projeYuklendi.emit(self._proje)
-            mat_key = self._proje.get("malzeme", "")
-            if mat_key:
-                self.malzemeSecildi.emit(mat_key)
         except Exception as exc:
             QMessageBox.critical(self, "Açma Hatası", f"Dosya okunamadı:\n{exc}")
+
+    def load_project_dict(self, data: Dict[str, Any],
+                          dosya_yolu: Optional[str] = None) -> None:
+        """Proje dict'ini yükle ve panellere uygula (dosya, autosave
+        kurtarması ve sürüm geçmişi geri dönüşü için ortak yol).
+
+        Migrasyon her zaman zorunlu — v1.0 verisi kayıpsız v2.0 olur.
+        """
+        self._proje = _migrate_project(data)
+        self._dosya_yolu = dosya_yolu
+        self._fill_form(self._proje)
+        # Yüklenen projeyi panellere otomatik uygula — katman dizilimi
+        # dahil tüm tasarım verisi geri yüklenir
+        self.projeYuklendi.emit(self._proje)
+        mat_key = self._proje.get("malzeme", "")
+        if mat_key:
+            self.malzemeSecildi.emit(mat_key)
 
     def _save_to_file(self, path: str) -> bool:
         try:
@@ -784,6 +846,62 @@ class ProjeYoneticisiPanel(QWidget):
             self, "Proje Uygulandı",
             f"Proje '{self._proje['proje_adi']}' tüm panellere uygulandı.",
         )
+
+    # ── Sürüm Geçmişi (Faz 25 Sprint 3) ─────────────────────────────────────
+
+    def set_autosave_manager(self, mgr) -> None:
+        """MainWindow'un AutoSaveManager'ını kur ve listeyi doldur."""
+        self._autosave_mgr = mgr
+        if mgr is not None:
+            mgr.autosaved.connect(lambda _p: self.refresh_history())
+        self.refresh_history()
+
+    def refresh_history(self) -> None:
+        """Otomatik kayıt sürüm listesini diskten tazele."""
+        self._history_list.clear()
+        if self._autosave_mgr is None:
+            self._history_hint.setText(
+                "Otomatik kayıt etkin değil — sürüm listesi boş.")
+            return
+        versions = self._autosave_mgr.list_versions()
+        for ver in versions:
+            item = QListWidgetItem(ver.label)
+            item.setData(Qt.UserRole, ver.path)
+            item.setToolTip(ver.path)
+            self._history_list.addItem(item)
+        self._history_hint.setText(
+            f"{len(versions)} sürüm — her 30 sn'de bir otomatik kayıt "
+            f"(son 5 sürüm saklanır).")
+
+    def _on_revert_to_version(self) -> None:
+        """Seçili otomatik kayıt sürümüne geri dön."""
+        if self._autosave_mgr is None:
+            return
+        item = self._history_list.currentItem()
+        if item is None:
+            QMessageBox.information(
+                self, "Sürüm Geçmişi", "Önce listeden bir sürüm seçin.")
+            return
+        path = item.data(Qt.UserRole)
+        reply = QMessageBox.question(
+            self, "Sürüme Dön",
+            f"Seçili sürüme dönülecek:\n{item.text()}\n\n"
+            "Mevcut durum önce güvenlik yedeği olarak kaydedilir.\n"
+            "Devam edilsin mi?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        # Yanlış geri dönüş de geri alınabilsin: önce mevcut durumu yedekle
+        self._autosave_mgr.force_save()
+        data = self._autosave_mgr.load_version(path)
+        if data is None:
+            QMessageBox.critical(
+                self, "Sürüm Geçmişi", "Sürüm dosyası okunamadı.")
+            return
+        self.load_project_dict(data, dosya_yolu=self._dosya_yolu)
+        self._mark_dirty()   # geri dönülen durum diskteki .fwp ile farklı
+        self.refresh_history()
 
     # ── Harici API ───────────────────────────────────────────────────────────
 
