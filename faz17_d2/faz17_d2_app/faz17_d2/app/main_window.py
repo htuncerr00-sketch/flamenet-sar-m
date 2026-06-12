@@ -264,6 +264,22 @@ class FilamentWindingApp(QMainWindow):
             self._panel_katman.apply_project)
         self._panel_proje.projeYuklendi.connect(
             self._panel_uretim.apply_project)
+        self._panel_proje.projeYuklendi.connect(
+            self._panel_entegre.apply_project)
+
+        # ── Sprint 1: Proje kalıcılığı (Schema v2.0) + kirli bayrak ──────────
+        # Kayıt sırasında katman dizilim verilerini panellerden çek
+        self._panel_proje.set_data_providers(
+            katman_provider=self._panel_katman.get_stack_dict,
+            entegre_provider=self._panel_entegre.get_design_state,
+        )
+        # Tasarım panellerindeki değişiklikler projeyi "kaydedilmemiş" yapar
+        self._panel_katman.katmanDegisti.connect(
+            lambda *_: self._panel_proje.mark_dirty_external())
+        self._panel_entegre.tasarimDegisti.connect(
+            self._panel_proje.mark_dirty_external)
+        # Kirli bayrak → pencere başlığında "*" göstergesi
+        self._panel_proje.degisiklikDurumu.connect(self._on_proje_dirty_changed)
 
         # Malzeme kütüphanesi → katman yöneticileri
         self._panel_malzeme.malzemeSecildi.connect(
@@ -748,8 +764,29 @@ class FilamentWindingApp(QMainWindow):
             "<p>Faz 17 — Üretim Kalitesinde Masaüstü Uygulaması</p>"
             "<p>Faz 1–16 arka uç katmanı üzerine inşa edilmiştir.</p>")
 
+    def _on_proje_dirty_changed(self, dirty: bool) -> None:
+        """Kirli bayrak değişimi → pencere başlığını güncelle."""
+        base = "Filament Sarma Kontrolü"
+        self.setWindowTitle(f"* {base}" if dirty else base)
+
     def closeEvent(self, ev):
         """Async-safe shutdown."""
+        # Kaydedilmemiş proje değişikliği varsa kullanıcıya sor
+        # (headless/test modunda modal diyalog açılmaz)
+        if not self._headless and self._panel_proje.has_unsaved_changes():
+            reply = QMessageBox.question(
+                self, "Kaydedilmemiş Değişiklikler",
+                "Projede kaydedilmemiş değişiklikler var.\n"
+                "Çıkmadan önce kaydetmek ister misiniz?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            )
+            if reply == QMessageBox.Cancel:
+                ev.ignore()
+                return
+            if reply == QMessageBox.Save:
+                if not self._panel_proje.save_current():
+                    ev.ignore()
+                    return
         try:
             # Save layout
             self._save_layout()

@@ -4,9 +4,9 @@ panels/proje_yoneticisi.py — Proje Yöneticisi Paneli
 Filament sarma CAM projesini oluşturma, açma, kaydetme ve yönetme.
 
 Proje dosyası biçimi: JSON (.fwp — Filament Winding Project)
-Şema:
+Şema v2.0:
   {
-    "versiyon": "1.0",
+    "versiyon": "2.0",
     "proje_adi": str,
     "aciklama": str,
     "musteri": str,
@@ -21,21 +21,37 @@ Proje dosyası biçimi: JSON (.fwp — Filament Winding Project)
       "konic_aci_deg": float,
       "kubbe_yukseklik_mm": float
     },
-    "katmanlar": [
+    "katmanlar": [              # v1.0 özet liste (geriye dönük uyumluluk)
       {"tip": "sarmal"|"cevre", "aci_deg": float, "cift_sayisi": int,
        "ply_kalinlik_mm": float}
     ],
     "basinc_MPa": float,
-    "notlar": str
+    "notlar": str,
+
+    # ── v2.0 alanları ──
+    "katman_yigini": {          # KatmanDizilimPaneli LayerStack.to_dict()
+      "versiyon": "1.0", "default_friction_mu": float,
+      "next_id": int, "layers": [LayerSpec dict, ...]
+    },
+    "entegre_panel_katmanlar": [  # EntegreTasarimPaneli katman tablosu
+      {"tip": str, "alpha_deg": float, "fitil_mm": float, "n_kat": int}
+    ],
+    "entegre_panel_mandrel": {...},   # EntegreTasarimPaneli mandrel ayarları
+    "sarma_parametreleri": {...},     # EntegreTasarimPaneli fiber/sarma ayarları
+    "makine_profili_ismi": str        # aktif makine profili (gelecek kullanım)
   }
+
+Eski v1.0 dosyaları `_migrate_project()` ile kayıpsız olarak v2.0'a
+yükseltilerek açılır — hiçbir mevcut proje kırılmaz.
 """
 from __future__ import annotations
 
 import json
 import os
+import time
 import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional
 
 from PySide6.QtCore import Qt, Signal, QSettings
 from PySide6.QtWidgets import (
@@ -49,7 +65,7 @@ from PySide6.QtWidgets import (
 
 from ..themes.dark_industrial import COLOR
 
-_SCHEMA_VERSION = "1.0"
+_SCHEMA_VERSION = "2.0"
 _FILE_FILTER = "Filament Sarma Projesi (*.fwp);;JSON Dosyaları (*.json);;Tüm Dosyalar (*)"
 _SETTINGS_KEY = "recent_projects"
 _MAX_RECENT = 10
@@ -85,7 +101,46 @@ def _empty_project() -> Dict[str, Any]:
         "katmanlar": [],
         "basinc_MPa": 10.0,
         "notlar": "",
+        # v2.0 alanları
+        "katman_yigini": {"layers": []},
+        "entegre_panel_katmanlar": [],
+        "entegre_panel_mandrel": {},
+        "sarma_parametreleri": {},
+        "makine_profili_ismi": "",
     }
+
+
+def _migrate_project(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Eski şema sürümlerini kayıpsız olarak v2.0'a yükselt.
+
+    v1.0 dosyalarında bulunmayan v2.0 alanları güvenli varsayılanlarla
+    eklenir; mevcut tüm alanlar olduğu gibi korunur. Her dosya yüklemesinde
+    zorunlu olarak çağrılır — hiçbir eski proje kırılmaz.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Proje dosyası geçerli bir JSON nesnesi değil")
+
+    ver = str(data.get("versiyon", "1.0"))
+    if ver in ("1.0", "1"):
+        data["versiyon"] = _SCHEMA_VERSION
+
+    # v1.0 çekirdek alanlarına tolerans (eksik/bozuk dosyalar)
+    data.setdefault("proje_adi", "Adsız Proje")
+    data.setdefault("mandrel", {})
+    data.setdefault("katmanlar", [])
+
+    # v2.0 alanları
+    yigin = data.get("katman_yigini")
+    if not isinstance(yigin, dict) or "layers" not in yigin:
+        data["katman_yigini"] = {"layers": []}
+    if not isinstance(data.get("entegre_panel_katmanlar"), list):
+        data["entegre_panel_katmanlar"] = []
+    if not isinstance(data.get("entegre_panel_mandrel"), dict):
+        data["entegre_panel_mandrel"] = {}
+    if not isinstance(data.get("sarma_parametreleri"), dict):
+        data["sarma_parametreleri"] = {}
+    data.setdefault("makine_profili_ismi", "")
+    return data
 
 
 # ── Ana panel ────────────────────────────────────────────────────────────────
@@ -103,12 +158,21 @@ class ProjeYoneticisiPanel(QWidget):
     # Diğer paneller proje değişikliklerini dinler
     projeYuklendi  = Signal(dict)   # proje dict
     malzemeSecildi = Signal(str)    # material key
+    degisiklikDurumu = Signal(bool) # kirli bayrak değişimi (True = kaydedilmemiş)
+
+    # Proje yükleme/uygulama sonrası panellerin debounce'lu sinyalleri sahte
+    # kirlilik üretmesin diye uygulanan bağışıklık penceresi (saniye).
+    _DIRTY_GRACE_S = 1.5
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._proje: Dict[str, Any] = _empty_project()
         self._dosya_yolu: Optional[str] = None
         self._degistirildi = False
+        self._dirty_grace_until = 0.0
+        # Kayıt sırasında katman verisi sağlayan callable'lar (MainWindow kurar)
+        self._katman_provider: Optional[Callable[[], Dict[str, Any]]] = None
+        self._entegre_provider: Optional[Callable[[], Dict[str, Any]]] = None
         self._settings = QSettings("FilamentSarma", "ProjeYoneticisi")
         self._build_ui()
         self._load_recent_list()
@@ -434,12 +498,13 @@ class ProjeYoneticisiPanel(QWidget):
 
         self._update_summary()
         self._degistirildi = False
+        self._dirty_grace_until = time.monotonic() + self._DIRTY_GRACE_S
         self._update_status()
 
     def _read_form(self) -> Dict[str, Any]:
         tip_map = {0: "silindir", 1: "konik", 2: "kubbeli_silindir"}
         now = datetime.datetime.now().isoformat(timespec="seconds")
-        return {
+        data = {
             "versiyon": _SCHEMA_VERSION,
             "proje_adi": self._fld_adi.text().strip() or "Adsız Proje",
             "aciklama": self._fld_aciklama.toPlainText().strip(),
@@ -458,13 +523,74 @@ class ProjeYoneticisiPanel(QWidget):
             "katmanlar": self._proje.get("katmanlar", []),
             "basinc_MPa": self._fld_basinc.value(),
             "notlar": self._fld_notlar.toPlainText().strip(),
+            # v2.0 alanları — paneller veri sağlamazsa son bilinen değer korunur
+            "katman_yigini": self._proje.get("katman_yigini", {"layers": []}),
+            "entegre_panel_katmanlar":
+                self._proje.get("entegre_panel_katmanlar", []),
+            "entegre_panel_mandrel":
+                self._proje.get("entegre_panel_mandrel", {}),
+            "sarma_parametreleri":
+                self._proje.get("sarma_parametreleri", {}),
+            "makine_profili_ismi":
+                self._proje.get("makine_profili_ismi", ""),
         }
+
+        # Canlı panel verisi (MainWindow'un kurduğu sağlayıcılar üzerinden)
+        if self._katman_provider is not None:
+            try:
+                yigin = self._katman_provider()
+                if isinstance(yigin, dict) and "layers" in yigin:
+                    data["katman_yigini"] = yigin
+            except Exception:
+                pass  # sağlayıcı hatası kaydı engellemesin
+        if self._entegre_provider is not None:
+            try:
+                st = self._entegre_provider() or {}
+                data["entegre_panel_mandrel"]   = st.get("mandrel", {})
+                data["sarma_parametreleri"]     = st.get("sarma", {})
+                data["entegre_panel_katmanlar"] = st.get("katmanlar", [])
+            except Exception:
+                pass
+
+        return data
 
     # ── Durum yönetimi ───────────────────────────────────────────────────────
 
     def _mark_dirty(self) -> None:
         self._degistirildi = True
         self._update_status()
+
+    def mark_dirty_external(self) -> None:
+        """Diğer panellerden (katman tablosu vb.) gelen değişiklik bildirimi.
+
+        Proje yüklemesinin hemen ardından panellerin debounce'lu sinyalleri
+        (autosend, katmanDegisti) sahte kirlilik üretmesin diye kısa bir
+        bağışıklık penceresi uygulanır.
+        """
+        if time.monotonic() < self._dirty_grace_until:
+            return
+        self._mark_dirty()
+
+    def has_unsaved_changes(self) -> bool:
+        """Kaydedilmemiş değişiklik var mı (MainWindow.closeEvent için)."""
+        return self._degistirildi
+
+    def save_current(self) -> bool:
+        """Mevcut projeyi kaydet (MainWindow.closeEvent için). True = başarılı."""
+        return self._on_save()
+
+    def set_data_providers(
+        self,
+        katman_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        entegre_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> None:
+        """Kayıt sırasında katman verisi sağlayan callable'ları kur.
+
+        katman_provider  : KatmanDizilimPaneli.get_stack_dict
+        entegre_provider : EntegreTasarimPaneli.get_design_state
+        """
+        self._katman_provider = katman_provider
+        self._entegre_provider = entegre_provider
 
     def _update_status(self) -> None:
         if self._degistirildi:
@@ -476,6 +602,7 @@ class ProjeYoneticisiPanel(QWidget):
 
         path_txt = self._dosya_yolu or "Kaydedilmemiş proje"
         self._lbl_path.setText(path_txt)
+        self.degisiklikDurumu.emit(self._degistirildi)
 
     def _update_summary(self) -> None:
         p = self._read_form()
@@ -566,10 +693,17 @@ class ProjeYoneticisiPanel(QWidget):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            self._proje = data
+            # Zorunlu migrasyon: v1.0 dosyaları kayıpsız v2.0'a yükseltilir
+            self._proje = _migrate_project(data)
             self._dosya_yolu = path
             self._fill_form(self._proje)
             self._add_to_recent(path)
+            # Yüklenen projeyi panellere otomatik uygula — katman dizilimi
+            # dahil tüm tasarım verisi geri yüklenir
+            self.projeYuklendi.emit(self._proje)
+            mat_key = self._proje.get("malzeme", "")
+            if mat_key:
+                self.malzemeSecildi.emit(mat_key)
         except Exception as exc:
             QMessageBox.critical(self, "Açma Hatası", f"Dosya okunamadı:\n{exc}")
 
@@ -636,6 +770,7 @@ class ProjeYoneticisiPanel(QWidget):
     def _on_apply_to_panels(self) -> None:
         self._proje = self._read_form()
         self._degistirildi = False
+        self._dirty_grace_until = time.monotonic() + self._DIRTY_GRACE_S
         self._update_status()
         self._update_summary()
 

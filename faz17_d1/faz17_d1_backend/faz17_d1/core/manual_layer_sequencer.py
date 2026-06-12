@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import math
 import enum
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from typing import List, Optional, Tuple, Dict, Any, TYPE_CHECKING
 
 import numpy as np
@@ -210,8 +210,11 @@ class LayerSpec:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "LayerSpec":
-        d2 = dict(d)
-        d2["type"] = LayerType(d2.get("type", "helical"))
+        # Bilinmeyen anahtarlara (örn. UI tarafının eklediği 'layer_type'
+        # alias'ı) dayanıklı: yalnızca dataclass alanları alınır.
+        valid = {f.name for f in fields(cls)}
+        d2 = {k: v for k, v in d.items() if k in valid}
+        d2["type"] = LayerType(d.get("type", d.get("layer_type", "helical")))
         return cls(**d2)
 
 

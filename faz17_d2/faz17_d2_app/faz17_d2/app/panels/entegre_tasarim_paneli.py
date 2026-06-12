@@ -527,6 +527,10 @@ class EntegreTasarimPaneli(QWidget):
     gerçekçi 3D makine görünüşü tek bir sayfada.
     """
 
+    # Tasarım verisi (katman tablosu) kullanıcı tarafından değiştirildiğinde
+    # fırlatılır — proje yöneticisi kirli bayrağı için dinler.
+    tasarimDegisti = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._stl_path: Optional[str] = None
@@ -536,6 +540,8 @@ class EntegreTasarimPaneli(QWidget):
         self._worker_thread: Optional[QThread] = None
         self._backend = _try_backend()
         self._backend_ok = self._backend[0] is not None
+        # Proje yükleme sırasında tasarimDegisti fırlatılmasın
+        self._suppress_dirty = False
         self._build_ui()
 
     # ── UI inşası ─────────────────────────────────────────────────────────────
@@ -814,6 +820,7 @@ class EntegreTasarimPaneli(QWidget):
         self._layer_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._layer_table.setAlternatingRowColors(True)
         self._layer_table.verticalHeader().setVisible(False)
+        self._layer_table.itemChanged.connect(self._on_layer_item_changed)
 
         tbl_v.addWidget(QLabel(
             "Katmanlar  —  Çift tıkla düzenle  |  '+ Helisel/Hoop/Polar' ile ekle"))
@@ -943,21 +950,22 @@ class EntegreTasarimPaneli(QWidget):
             "QPushButton{background:#3a1f1f;color:#ff5050;"
             "border:1px solid #5a2a2a;border-radius:2px;}"
             "QPushButton:hover{background:#4a2a2a;}")
-        btn_del.clicked.connect(lambda _, r=row: self._del_row(r))
+        btn_del.clicked.connect(lambda _=False, b=btn_del: self._del_row_by_widget(b))
         tbl.setCellWidget(row, COL_DEL, btn_del)
 
-    def _del_row(self, row: int) -> None:
-        # Silme butonları satır indeksi kaydıkça güncellenmez —
-        # mevcut satır indeksini bul
+        if not self._suppress_dirty:
+            self.tasarimDegisti.emit()
+
+    def _del_row_by_widget(self, btn: QPushButton) -> None:
+        # Satır indeksi ekleme/silme ile kaydığı için lambda'da yakalanan
+        # indeks güvenilmez; butonun kendisi 'is' kimlik karşılaştırmasıyla
+        # aranır — her zaman doğru satır silinir.
         tbl = self._layer_table
         for r in range(tbl.rowCount()):
-            btn = tbl.cellWidget(r, COL_DEL)
-            if btn and btn.sender() == self.sender():
+            if tbl.cellWidget(r, COL_DEL) is btn:
                 tbl.removeRow(r)
+                self.tasarimDegisti.emit()
                 return
-        # fallback
-        if 0 <= row < tbl.rowCount():
-            tbl.removeRow(row)
 
     # ── CAM hesaplama ─────────────────────────────────────────────────────────
 
@@ -1145,6 +1153,129 @@ class EntegreTasarimPaneli(QWidget):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(self._gcode_text)
             self._status_lbl.setText(f"Kaydedildi: {os.path.basename(path)}")
+
+    def _on_layer_item_changed(self, _item) -> None:
+        """Katman tablosu hücresi düzenlendi — kirli bayrağı tetikle."""
+        if not self._suppress_dirty:
+            self.tasarimDegisti.emit()
+
+    # ── Proje kalıcılığı (Schema v2.0) ────────────────────────────────────────
+
+    def get_layer_rows(self) -> List[dict]:
+        """Katman tablosunu seri hale getirilebilir satır listesine çevir."""
+        tbl = self._layer_table
+        rows: List[dict] = []
+        for r in range(tbl.rowCount()):
+            cb = tbl.cellWidget(r, COL_TIP)
+            tip = cb.currentText() if cb else "Sarmal"
+
+            def _cell(col: int, default: float) -> float:
+                it = tbl.item(r, col)
+                if it is None:
+                    return default
+                try:
+                    return float(it.text().replace(",", "."))
+                except ValueError:
+                    return default
+
+            rows.append({
+                "tip":       tip,
+                "alpha_deg": _cell(COL_ALPHA, 55.0),
+                "fitil_mm":  _cell(COL_TOW, 6.0),
+                "n_kat":     max(1, int(_cell(COL_N, 1))),
+            })
+        return rows
+
+    def set_layer_rows(self, rows: List[dict]) -> None:
+        """Satır listesinden katman tablosunu yeniden kur (sinyalsiz)."""
+        self._suppress_dirty = True
+        try:
+            self._layer_table.setRowCount(0)
+            for rd in rows or []:
+                self._add_layer_row(
+                    str(rd.get("tip", "Sarmal")),
+                    float(rd.get("alpha_deg", 55.0)),
+                    float(rd.get("fitil_mm", rd.get("fitil_genisligi_mm", 6.0))),
+                    max(1, int(rd.get("n_kat", rd.get("n_layers", 1)))),
+                )
+        finally:
+            self._suppress_dirty = False
+
+    def get_design_state(self) -> dict:
+        """Panelin tüm tasarım durumu — proje dosyasına (v2.0) kaydedilir."""
+        return {
+            "mandrel": {
+                "tip":                self._cb_type.currentText(),
+                "cap_mm":             self._sp_diam.value(),
+                "uzunluk_mm":         self._sp_len.value(),
+                "konik_aci_deg":      self._sp_cone.value(),
+                "kubbe_yukseklik_mm": self._sp_dome.value(),
+                "kubbe_hr_orani":     self._sp_dome_hr.value(),
+                "stl_yolu":           self._stl_path or "",
+            },
+            "sarma": {
+                "alpha_deg":      self._sp_alpha.value(),
+                "fitil_mm":       self._sp_tow.value(),
+                "kat_sayisi":     self._sp_nlayers.value(),
+                "cakisma_pct":    self._sp_overlap.value(),
+                "strateji":       self._cb_strat.currentText(),
+                "ilerleme_mm_s":  self._sp_feed.value(),
+                "rpm":            self._sp_rpm.value(),
+                "surtunme_mu":    self._sp_friction.value(),
+            },
+            "katmanlar": self.get_layer_rows(),
+        }
+
+    def apply_project(self, proje: dict) -> None:
+        """ProjeYoneticisi.projeYuklendi → tasarım durumunu geri yükle."""
+        if not isinstance(proje, dict):
+            return
+        m = proje.get("entegre_panel_mandrel") or {}
+        s = proje.get("sarma_parametreleri") or {}
+        katmanlar = proje.get("entegre_panel_katmanlar") or []
+        if not (m or s or katmanlar):
+            return  # v1.0 projesi — entegre panel verisi yok
+
+        self._suppress_dirty = True
+        try:
+            if m:
+                for w in (self._cb_type, self._sp_diam, self._sp_len,
+                          self._sp_cone, self._sp_dome, self._sp_dome_hr):
+                    w.blockSignals(True)
+                tip = str(m.get("tip", "Silindir"))
+                idx = self._cb_type.findText(tip)
+                if idx >= 0:
+                    self._cb_type.setCurrentIndex(idx)
+                self._sp_diam.setValue(float(m.get("cap_mm", 100.0)))
+                self._sp_len.setValue(float(m.get("uzunluk_mm", 300.0)))
+                self._sp_cone.setValue(float(m.get("konik_aci_deg", 10.0)))
+                self._sp_dome.setValue(float(m.get("kubbe_yukseklik_mm", 30.0)))
+                self._sp_dome_hr.setValue(float(m.get("kubbe_hr_orani", 0.7)))
+                stl = m.get("stl_yolu") or ""
+                if stl and os.path.exists(stl):
+                    self._stl_path = stl
+                    self._lbl_stl.setText(os.path.basename(stl))
+                for w in (self._cb_type, self._sp_diam, self._sp_len,
+                          self._sp_cone, self._sp_dome, self._sp_dome_hr):
+                    w.blockSignals(False)
+                self._on_mandrel_type_changed()
+
+            if s:
+                self._sp_alpha.setValue(float(s.get("alpha_deg", 55.0)))
+                self._sp_tow.setValue(float(s.get("fitil_mm", 6.0)))
+                self._sp_nlayers.setValue(int(s.get("kat_sayisi", 4)))
+                self._sp_overlap.setValue(float(s.get("cakisma_pct", 5.0)))
+                sidx = self._cb_strat.findText(str(s.get("strateji", "")))
+                if sidx >= 0:
+                    self._cb_strat.setCurrentIndex(sidx)
+                self._sp_feed.setValue(float(s.get("ilerleme_mm_s", 80.0)))
+                self._sp_rpm.setValue(float(s.get("rpm", 60.0)))
+                self._sp_friction.setValue(float(s.get("surtunme_mu", 0.0)))
+
+            if katmanlar:
+                self.set_layer_rows(katmanlar)
+        finally:
+            self._suppress_dirty = False
 
     # ── Dış panel entegrasyonu ────────────────────────────────────────────────
 

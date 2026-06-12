@@ -1532,9 +1532,34 @@ class KatmanDizilimPaneli(QWidget):
         """Mevcut LayerStack referansı (CAM panel okuma için)."""
         return self._stack
 
+    def get_stack_dict(self) -> Dict[str, Any]:
+        """Katman yığınını seri hale getirilebilir dict olarak döndür.
+
+        Proje yöneticisi kayıt sırasında veri sağlayıcı olarak çağırır
+        (Schema v2.0 → `katman_yigini` alanı).
+        """
+        return self._get_stack_as_dict()
+
     def apply_project(self, proje: Dict[str, Any]) -> None:
         """ProjeYoneticisi.projeYuklendi sinyaline cevap olarak çağrılır."""
         if not self._backend_ok:
+            # Backend yok: v2.0 katman yığınını saf-UI satırları olarak yükle
+            yigin_layers = (proje.get("katman_yigini") or {}).get("layers", [])
+            if yigin_layers:
+                self._table.setRowCount(0)
+                self._ui_layers.clear()
+                for ld in yigin_layers:
+                    lt = ld.get("layer_type") or ld.get("type", "helical")
+                    self._insert_raw_row(
+                        lt,
+                        alpha_deg=float(ld.get("alpha_deg", 45.0)),
+                        tow_w=float(ld.get("fitil_genisligi_mm", 6.0)),
+                        overlap=float(ld.get("cakisma_pct", 5.0)),
+                        feed=float(ld.get("feed_mm_s", 80.0)),
+                        rpm=float(ld.get("spindle_rpm", 60.0)),
+                        friction=float(ld.get("friction_mu", 0.30)),
+                        strategy=ld.get("strategy", "geodesic"),
+                    )
             return
         m = proje.get("mandrel", {})
         self.set_mandrel_parameters(
@@ -1549,7 +1574,19 @@ class KatmanDizilimPaneli(QWidget):
         if code:
             self.set_safety_code(code)
 
-        # Katmanları proje'den yükle
+        # Schema v2.0: tam katman yığını (öncelikli yol — kayıpsız geri yükleme)
+        yigin = proje.get("katman_yigini") or {}
+        if yigin.get("layers"):
+            try:
+                self._stack = LayerStack.from_dict(yigin)
+                self._refresh_table()
+                self._schedule_recalc()
+                self._emit_stack_changed()
+                return
+            except Exception:
+                pass  # bozuk yığın → v1.0 'katmanlar' yoluna düş
+
+        # Schema v1.0 (eski format): özet katman listesi
         katmanlar = proje.get("katmanlar", [])
         if katmanlar:
             self._stack.clear()
