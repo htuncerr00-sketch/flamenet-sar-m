@@ -37,6 +37,10 @@ from PySide6.QtWidgets import (
 )
 
 from ..themes.dark_industrial import COLOR
+from ..undo_commands import (
+    AddLayerCommand, DeleteLayerCommand, EditLayerCommand,
+    MoveLayerCommand, ReplaceStackCommand,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -419,6 +423,10 @@ class KatmanDizilimPaneli(QWidget):
 
         # Tablo programatik güncelleme sırasında sinyal çakışmasını engelle
         self._suppress_cell_signal = False
+
+        # Merkezi undo/redo yığını (MainWindow kurar; yoksa komutlar
+        # doğrudan uygulanır — panel standalone da çalışır)
+        self._undo_stack = None
 
         # Debounce timer (tablo edit → analiz)
         self._debounce_timer = QTimer(self)
@@ -848,6 +856,73 @@ class KatmanDizilimPaneli(QWidget):
                 it.setBackground(QBrush(bg))
 
     # ════════════════════════════════════════════════════════════════════════
+    # Undo/Redo altyapısı (Faz 25 Sprint 2)
+    # ════════════════════════════════════════════════════════════════════════
+
+    def set_undo_stack(self, stack) -> None:
+        """MainWindow'daki merkezi QUndoStack'i kur."""
+        self._undo_stack = stack
+
+    def _push_cmd(self, cmd) -> None:
+        """Komutu yığına it; yığın yoksa doğrudan uygula (standalone mod)."""
+        if self._undo_stack is not None:
+            self._undo_stack.push(cmd)
+        else:
+            cmd.redo()
+
+    # ── Komut ilkeleri: komutların redo()/undo() çağırdığı tek mutasyon
+    #    noktaları. Sinyaller bastırılır — komut kendini yeniden push edemez.
+
+    def _cmd_stack_len(self) -> int:
+        return len(self._stack) if self._backend_ok else 0
+
+    def _cmd_insert_layers(self, index: int, dicts: List[Dict[str, Any]]) -> None:
+        for i, d in enumerate(dicts):
+            spec = LayerSpec.from_dict(d)
+            self._stack.insert_layer(index + i, spec)
+        self._refresh_table()
+        self._schedule_recalc()
+        self._emit_stack_changed()
+
+    def _cmd_remove_layers(self, index: int, count: int) -> None:
+        for _ in range(count):
+            if 0 <= index < len(self._stack):
+                self._stack.remove_layer(index)
+        self._refresh_table()
+        self._schedule_recalc()
+        self._emit_stack_changed()
+
+    def _cmd_set_layer_field(self, index: int, field: str, value: Any) -> None:
+        if not (0 <= index < len(self._stack)):
+            return
+        L = self._stack[index]
+        if field == "type":
+            L.type = LayerType(value)
+        else:
+            setattr(L, field, value)
+        L.label = L.auto_label()
+        self._suppress_cell_signal = True
+        self._populate_row(index, L)
+        self._suppress_cell_signal = False
+        self._schedule_recalc()
+        self._emit_stack_changed()
+
+    def _cmd_move_layer(self, from_index: int, to_index: int) -> None:
+        self._stack.move_layer(from_index, to_index)
+        self._refresh_table()
+        self._table.selectRow(to_index)
+        self._schedule_recalc()
+        self._emit_stack_changed()
+
+    def _cmd_set_stack(self, stack_dict: Dict[str, Any]) -> None:
+        self._stack = LayerStack.from_dict(stack_dict)
+        self._refresh_table()
+        if len(self._stack) == 0:
+            self._update_stats_blank()
+        self._schedule_recalc()
+        self._emit_stack_changed()
+
+    # ════════════════════════════════════════════════════════════════════════
     # Buton handler'ları
     # ════════════════════════════════════════════════════════════════════════
 
@@ -860,12 +935,13 @@ class KatmanDizilimPaneli(QWidget):
             thickness_mm=0.30, feed_mm_s=80.0, spindle_rpm=60.0,
             strategy="geodesic",
         )
-        self._stack.add_layer(spec)
+        dicts = [spec.to_dict()]
 
-        # Dengeleyici çift önerisi
+        # Dengeleyici çift önerisi — kabul edilirse her iki katman TEK
+        # komutta eklenir: tek Undo çifti birlikte kaldırır.
         reply = QMessageBox.question(
             self, "Denge Çifti",
-            f"+{spec.alpha_deg:.1f}° helisel katman eklendi.\n\n"
+            f"+{spec.alpha_deg:.1f}° helisel katman ekleniyor.\n\n"
             f"Burulma gerilmelerini sönümlemek için dengeleyici "
             f"−{spec.alpha_deg:.1f}° katmanı otomatik olarak eklensin mi?\n\n"
             f"(Dengeli laminat kuralı: her +α bir −α eşi gerektirir.)",
@@ -874,11 +950,12 @@ class KatmanDizilimPaneli(QWidget):
         if reply == QMessageBox.Yes:
             mate = self._stack.auto_suggest_anti_symmetric_pair(spec)
             if mate is not None:
-                self._stack.add_layer(mate)
+                dicts.append(mate.to_dict())
 
-        self._refresh_table()
-        self._schedule_recalc()
-        self._emit_stack_changed()
+        self._push_cmd(AddLayerCommand(
+            self, dicts,
+            text=("±α denge çifti ekle" if len(dicts) > 1
+                  else "helisel katman ekle")))
         self._set_status(f"Helisel katman eklendi: {spec.label}")
 
     def _on_add_hoop(self) -> None:
@@ -886,10 +963,8 @@ class KatmanDizilimPaneli(QWidget):
             self._insert_raw_row("hoop", alpha_deg=89.5, feed=60.0)
             return
         spec = self._stack.make_hoop()
-        self._stack.add_layer(spec)
-        self._refresh_table()
-        self._schedule_recalc()
-        self._emit_stack_changed()
+        self._push_cmd(AddLayerCommand(
+            self, [spec.to_dict()], text="hoop katman ekle"))
         self._set_status(f"Hoop katman eklendi: {spec.label}")
 
     def _on_add_polar(self) -> None:
@@ -897,10 +972,8 @@ class KatmanDizilimPaneli(QWidget):
             self._insert_raw_row("polar", alpha_deg=12.0)
             return
         spec = self._stack.make_polar()
-        self._stack.add_layer(spec)
-        self._refresh_table()
-        self._schedule_recalc()
-        self._emit_stack_changed()
+        self._push_cmd(AddLayerCommand(
+            self, [spec.to_dict()], text="polar katman ekle"))
         self._set_status(f"Polar katman eklendi: {spec.label}")
 
     def _on_add_skin(self) -> None:
@@ -908,10 +981,8 @@ class KatmanDizilimPaneli(QWidget):
             self._insert_raw_row("skin", alpha_deg=89.5, feed=60.0)
             return
         spec = self._stack.make_skin()
-        self._stack.add_layer(spec)
-        self._refresh_table()
-        self._schedule_recalc()
-        self._emit_stack_changed()
+        self._push_cmd(AddLayerCommand(
+            self, [spec.to_dict()], text="bitiş katmanı ekle"))
         self._set_status(f"Bitiş katmanı eklendi: {spec.label}")
 
     def _on_move_up(self) -> None:
@@ -926,11 +997,7 @@ class KatmanDizilimPaneli(QWidget):
             self._table.selectRow(row - 1)
             self._schedule_autosend()
             return
-        self._stack.move_layer(row, row - 1)
-        self._refresh_table()
-        self._table.selectRow(row - 1)
-        self._schedule_recalc()
-        self._emit_stack_changed()
+        self._push_cmd(MoveLayerCommand(self, row, row - 1))
 
     def _on_move_down(self) -> None:
         row = self._table.currentRow()
@@ -944,11 +1011,7 @@ class KatmanDizilimPaneli(QWidget):
             self._table.selectRow(row + 1)
             self._schedule_autosend()
             return
-        self._stack.move_layer(row, row + 1)
-        self._refresh_table()
-        self._table.selectRow(row + 1)
-        self._schedule_recalc()
-        self._emit_stack_changed()
+        self._push_cmd(MoveLayerCommand(self, row, row + 1))
 
     def _swap_table_rows(self, r1: int, r2: int) -> None:
         """No-backend: iki tablo satırının içeriğini (widget hariç) yerinde değiştir."""
@@ -997,10 +1060,7 @@ class KatmanDizilimPaneli(QWidget):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
-            self._stack.remove_layer(row)
-            self._refresh_table()
-            self._schedule_recalc()
-            self._emit_stack_changed()
+            self._push_cmd(DeleteLayerCommand(self, row, L.to_dict()))
             self._set_status(f"Katman silindi: {L.label}")
 
     def _on_clear_all(self) -> None:
@@ -1027,10 +1087,12 @@ class KatmanDizilimPaneli(QWidget):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
-            self._stack.clear()
-            self._refresh_table()
-            self._update_stats_blank()
-            self._emit_stack_changed()
+            # Çok satırlı silme = tek komut: tek Undo tüm yığını geri getirir
+            empty = {"versiyon": "1.0",
+                     "default_friction_mu": self._stack.default_friction_mu,
+                     "next_id": 1, "layers": []}
+            self._push_cmd(ReplaceStackCommand(
+                self, self._stack.to_dict(), empty, text="tümünü temizle"))
             self._set_status("Yığın temizlendi.")
 
     # ════════════════════════════════════════════════════════════════════════
@@ -1059,34 +1121,34 @@ class KatmanDizilimPaneli(QWidget):
             val = float(txt)
 
             if col == COL_ALPHA:
-                L.alpha_deg = val
+                field = "alpha_deg"
             elif col == COL_WIDTH:
                 if val <= 0:
                     raise ValueError("Fitil genişliği > 0 olmalı")
-                L.fitil_genisligi_mm = val
+                field = "fitil_genisligi_mm"
             elif col == COL_OVERLAP:
                 if not (0 <= val < 100):
                     raise ValueError("Çakışma ∈ [0, 100)")
-                L.cakisma_pct = val
+                field = "cakisma_pct"
             elif col == COL_FEED:
                 if val <= 0:
                     raise ValueError("Hız > 0 olmalı")
-                L.feed_mm_s = val
+                field = "feed_mm_s"
             elif col == COL_RPM:
                 if val <= 0:
                     raise ValueError("RPM > 0 olmalı")
-                L.spindle_rpm = val
+                field = "spindle_rpm"
             elif col == COL_FRICTION:
                 if not (0 <= val <= 1):
                     raise ValueError("μ ∈ [0, 1]")
-                L.friction_mu = val
+                field = "friction_mu"
             else:
                 return
 
-            # Etiketi güncelle (açı değişmiş olabilir)
-            L.label = L.auto_label()
-            self._schedule_recalc()
-            self._emit_stack_changed()
+            old_val = getattr(L, field)
+            if old_val == val:
+                return
+            self._push_cmd(EditLayerCommand(self, row, field, old_val, val))
 
         except ValueError as exc:
             QMessageBox.warning(
@@ -1099,31 +1161,34 @@ class KatmanDizilimPaneli(QWidget):
             self._suppress_cell_signal = False
 
     def _on_type_changed(self, row: int) -> None:
-        if not self._backend_ok or not (0 <= row < len(self._stack)):
+        if (self._suppress_cell_signal or not self._backend_ok
+                or not (0 <= row < len(self._stack))):
             return
         combo = self._table.cellWidget(row, COL_TYPE)
         if combo is None:
             return
         new_val = combo.currentData()
+        old_val = self._stack[row].type.value
+        if new_val == old_val:
+            return
         try:
-            self._stack[row].type = LayerType(new_val)
-            self._stack[row].label = self._stack[row].auto_label()
+            LayerType(new_val)
         except Exception:
             return
-        self._schedule_recalc()
-        self._emit_stack_changed()
+        self._push_cmd(EditLayerCommand(self, row, "type", old_val, new_val))
 
     def _on_strategy_changed(self, row: int) -> None:
-        if not self._backend_ok or not (0 <= row < len(self._stack)):
+        if (self._suppress_cell_signal or not self._backend_ok
+                or not (0 <= row < len(self._stack))):
             return
         combo = self._table.cellWidget(row, COL_STRATEGY)
         if combo is None:
             return
         new_val = combo.currentData()
-        if new_val in ("geodesic", "non_geodesic"):
-            self._stack[row].strategy = new_val
-            self._schedule_recalc()
-            self._emit_stack_changed()
+        old_val = self._stack[row].strategy
+        if new_val in ("geodesic", "non_geodesic") and new_val != old_val:
+            self._push_cmd(EditLayerCommand(
+                self, row, "strategy", old_val, new_val))
 
     def _on_selection_changed(self) -> None:
         row = self._table.currentRow()
@@ -1644,31 +1709,35 @@ class KatmanDizilimPaneli(QWidget):
             return
 
         if self._backend_ok:
-            self._stack.clear()
+            # Toplu yükleme = tek ReplaceStackCommand: tek Undo eski yığını
+            # eksiksiz geri getirir.
+            old_snapshot = self._stack.to_dict()
+            new_stack = LayerStack(
+                default_friction_mu=self._stack.default_friction_mu)
             for ld in layers:
                 try:
                     ltype_str = ld.get("type", "helical")
                     if ltype_str == "hoop":
-                        spec = self._stack.make_hoop(
+                        spec = new_stack.make_hoop(
                             alpha_deg=float(ld.get("alpha_deg", 89.5)),
                             fitil_genisligi_mm=float(ld.get("fitil_genisligi_mm", 6.0)),
                         )
                     elif ltype_str == "polar":
-                        spec = self._stack.make_polar(
+                        spec = new_stack.make_polar(
                             alpha_deg=float(ld.get("alpha_deg", 12.0)),
                             fitil_genisligi_mm=float(ld.get("fitil_genisligi_mm", 4.0)),
                         )
                     else:
-                        spec = self._stack.make_helical(
+                        spec = new_stack.make_helical(
                             alpha_deg=float(ld.get("alpha_deg", 45.0)),
                             fitil_genisligi_mm=float(ld.get("fitil_genisligi_mm", 6.0)),
                         )
-                    self._stack.add_layer(spec)
+                    new_stack.add_layer(spec)
                 except Exception:
                     continue
-            self._refresh_table()
-            self._schedule_recalc()
-            self._emit_stack_changed()
+            self._push_cmd(ReplaceStackCommand(
+                self, old_snapshot, new_stack.to_dict(),
+                text="optimizör reçetesi yükle"))
         else:
             self._table.setRowCount(0)
             self._ui_layers.clear()

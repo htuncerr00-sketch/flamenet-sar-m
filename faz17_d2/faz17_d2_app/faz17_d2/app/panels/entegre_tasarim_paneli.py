@@ -36,6 +36,10 @@ import pyqtgraph.opengl as gl
 from pyqtgraph.Qt import QtGui
 
 from ..themes.dark_industrial import COLOR
+from ..undo_commands import (
+    AddRowCommand, DeleteRowCommand, EditRowCellCommand,
+    ChangeMandrelCommand, ChangeMachineSettingsCommand,
+)
 
 # ── Arka plan CAM motor import'u ─────────────────────────────────────────────
 
@@ -542,7 +546,11 @@ class EntegreTasarimPaneli(QWidget):
         self._backend_ok = self._backend[0] is not None
         # Proje yükleme sırasında tasarimDegisti fırlatılmasın
         self._suppress_dirty = False
+        # Merkezi undo/redo yığını (MainWindow kurar; yoksa komutlar
+        # doğrudan uygulanır)
+        self._undo_stack = None
         self._build_ui()
+        self._init_param_tracking()
 
     # ── UI inşası ─────────────────────────────────────────────────────────────
 
@@ -903,58 +911,177 @@ class EntegreTasarimPaneli(QWidget):
             self._lbl_stl.setText(os.path.basename(path))
             self._on_mandrel_changed()
 
+    # ── Undo/Redo altyapısı (Faz 25 Sprint 2) ────────────────────────────────
+
+    def set_undo_stack(self, stack) -> None:
+        """MainWindow'daki merkezi QUndoStack'i kur."""
+        self._undo_stack = stack
+
+    def _push_cmd(self, cmd) -> None:
+        """Komutu yığına it; yığın yoksa doğrudan uygula (standalone mod)."""
+        if self._undo_stack is not None:
+            self._undo_stack.push(cmd)
+        else:
+            cmd.redo()
+
+    # ── Komut ilkeleri: tek mutasyon noktaları (sinyal güvenli) ──────────────
+
+    def _cmd_insert_row(self, index: int, rd: dict) -> None:
+        """Tablonun `index` konumuna satır ekle (komut redo/undo yolu)."""
+        outer = self._suppress_dirty
+        self._suppress_dirty = True
+        try:
+            tbl = self._layer_table
+            tbl.insertRow(index)
+
+            cb = QComboBox()
+            cb.setStyleSheet(_S_COMBO)
+            cb.addItems(["Sarmal", "Hoop", "Polar"])
+            cb.setCurrentText(str(rd.get("tip", "Sarmal")))
+            tbl.setCellWidget(index, COL_TIP, cb)
+
+            for col, txt in [
+                (COL_ALPHA, f"{float(rd.get('alpha_deg', 55.0)):.1f}"),
+                (COL_TOW,   f"{float(rd.get('fitil_mm', 6.0)):.2f}"),
+                (COL_N,     str(max(1, int(rd.get('n_kat', 1))))),
+            ]:
+                it = QTableWidgetItem(txt)
+                it.setTextAlignment(Qt.AlignCenter)
+                # UserRole = son bilinen değer (hücre düzenleme komutlarının
+                # eski değeri okuyabilmesi için)
+                it.setData(Qt.UserRole, txt)
+                tbl.setItem(index, col, it)
+
+            btn_del = QPushButton("✕")
+            btn_del.setFixedSize(28, 24)
+            btn_del.setStyleSheet(
+                "QPushButton{background:#3a1f1f;color:#ff5050;"
+                "border:1px solid #5a2a2a;border-radius:2px;}"
+                "QPushButton:hover{background:#4a2a2a;}")
+            btn_del.clicked.connect(
+                lambda _=False, b=btn_del: self._del_row_by_widget(b))
+            tbl.setCellWidget(index, COL_DEL, btn_del)
+        finally:
+            self._suppress_dirty = outer
+        if not outer:
+            self.tasarimDegisti.emit()
+
+    def _cmd_remove_row(self, index: int) -> None:
+        if 0 <= index < self._layer_table.rowCount():
+            self._layer_table.removeRow(index)
+            if not self._suppress_dirty:
+                self.tasarimDegisti.emit()
+
+    def _cmd_set_cell(self, row: int, col: int, text: str) -> None:
+        it = self._layer_table.item(row, col)
+        if it is None:
+            return
+        outer = self._suppress_dirty
+        self._suppress_dirty = True
+        try:
+            it.setText(text)
+            it.setData(Qt.UserRole, text)
+        finally:
+            self._suppress_dirty = outer
+        if not outer:
+            self.tasarimDegisti.emit()
+
+    def _cmd_set_param(self, key: str, value) -> None:
+        """Mandrel/makine parametresi widget'ını sinyalsiz güncelle."""
+        w, is_mandrel = self._param_map[key]
+        w.blockSignals(True)
+        try:
+            if isinstance(w, QComboBox):
+                idx = w.findText(str(value))
+                if idx >= 0:
+                    w.setCurrentIndex(idx)
+            else:
+                w.setValue(value)
+        finally:
+            w.blockSignals(False)
+        self._param_last[key] = self._param_value(key)
+        if is_mandrel:
+            # tip değişimi alan görünürlüklerini de günceller
+            if key == "tip":
+                self._on_mandrel_type_changed()
+            else:
+                self._on_mandrel_changed()
+        if not self._suppress_dirty:
+            self.tasarimDegisti.emit()
+
+    # ── Parametre takibi (ChangeMandrel / ChangeMachineSettings) ────────────
+
+    def _init_param_tracking(self) -> None:
+        """Mandrel + makine ayarı widget'larını undo takibine bağla."""
+        self._param_map = {
+            # key: (widget, is_mandrel)
+            "tip":                (self._cb_type,    True),
+            "cap_mm":             (self._sp_diam,    True),
+            "uzunluk_mm":         (self._sp_len,     True),
+            "konik_aci_deg":      (self._sp_cone,    True),
+            "kubbe_yukseklik_mm": (self._sp_dome,    True),
+            "kubbe_hr_orani":     (self._sp_dome_hr, True),
+            "alpha_deg":          (self._sp_alpha,    False),
+            "fitil_mm":           (self._sp_tow,      False),
+            "kat_sayisi":         (self._sp_nlayers,  False),
+            "cakisma_pct":        (self._sp_overlap,  False),
+            "strateji":           (self._cb_strat,    False),
+            "ilerleme_mm_s":      (self._sp_feed,     False),
+            "rpm":                (self._sp_rpm,      False),
+            "surtunme_mu":        (self._sp_friction, False),
+        }
+        for key, (w, _is_m) in self._param_map.items():
+            if isinstance(w, QComboBox):
+                w.currentTextChanged.connect(
+                    lambda txt, k=key: self._on_param_changed(k, txt))
+            else:
+                w.valueChanged.connect(
+                    lambda v, k=key: self._on_param_changed(k, v))
+        self._refresh_param_cache()
+
+    def _param_value(self, key: str):
+        w, _ = self._param_map[key]
+        return w.currentText() if isinstance(w, QComboBox) else w.value()
+
+    def _refresh_param_cache(self) -> None:
+        """Son bilinen parametre değerlerini widget'lardan tazele
+        (proje yükleme sonrası bayat 'old' değerleri engeller)."""
+        self._param_last = {k: self._param_value(k) for k in self._param_map}
+
+    def _on_param_changed(self, key: str, new_value) -> None:
+        if self._suppress_dirty:
+            return
+        old_value = self._param_last.get(key)
+        if old_value == new_value:
+            return
+        _, is_mandrel = self._param_map[key]
+        cls = ChangeMandrelCommand if is_mandrel else ChangeMachineSettingsCommand
+        self._push_cmd(cls(self, key, old_value, new_value))
+
     # ── Katman ekleme ─────────────────────────────────────────────────────────
 
     def _on_add_helical(self) -> None:
-        self._add_layer_row("Sarmal", self._sp_alpha.value(),
-                             self._sp_tow.value(), self._sp_nlayers.value())
+        self._push_cmd(AddRowCommand(self, {
+            "tip": "Sarmal", "alpha_deg": self._sp_alpha.value(),
+            "fitil_mm": self._sp_tow.value(),
+            "n_kat": self._sp_nlayers.value()}))
 
     def _on_add_hoop(self) -> None:
-        self._add_layer_row("Hoop", 89.5, self._sp_tow.value(), 1)
+        self._push_cmd(AddRowCommand(self, {
+            "tip": "Hoop", "alpha_deg": 89.5,
+            "fitil_mm": self._sp_tow.value(), "n_kat": 1}))
 
     def _on_add_polar(self) -> None:
-        self._add_layer_row("Polar", 12.0, self._sp_tow.value(), 1)
+        self._push_cmd(AddRowCommand(self, {
+            "tip": "Polar", "alpha_deg": 12.0,
+            "fitil_mm": self._sp_tow.value(), "n_kat": 1}))
 
     def _add_layer_row(self, ltype: str, alpha: float,
                        tow: float, n: int) -> None:
-        tbl = self._layer_table
-        row = tbl.rowCount()
-        tbl.insertRow(row)
-
-        # Tip combo
-        cb = QComboBox()
-        cb.setStyleSheet(_S_COMBO)
-        cb.addItems(["Sarmal", "Hoop", "Polar"])
-        cb.setCurrentText(ltype)
-        tbl.setCellWidget(row, COL_TIP, cb)
-
-        # Açı
-        a_item = QTableWidgetItem(f"{alpha:.1f}")
-        a_item.setTextAlignment(Qt.AlignCenter)
-        tbl.setItem(row, COL_ALPHA, a_item)
-
-        # Fitil
-        t_item = QTableWidgetItem(f"{tow:.2f}")
-        t_item.setTextAlignment(Qt.AlignCenter)
-        tbl.setItem(row, COL_TOW, t_item)
-
-        # Kat sayısı
-        n_item = QTableWidgetItem(str(n))
-        n_item.setTextAlignment(Qt.AlignCenter)
-        tbl.setItem(row, COL_N, n_item)
-
-        # Sil butonu
-        btn_del = QPushButton("✕")
-        btn_del.setFixedSize(28, 24)
-        btn_del.setStyleSheet(
-            "QPushButton{background:#3a1f1f;color:#ff5050;"
-            "border:1px solid #5a2a2a;border-radius:2px;}"
-            "QPushButton:hover{background:#4a2a2a;}")
-        btn_del.clicked.connect(lambda _=False, b=btn_del: self._del_row_by_widget(b))
-        tbl.setCellWidget(row, COL_DEL, btn_del)
-
-        if not self._suppress_dirty:
-            self.tasarimDegisti.emit()
+        """Tablonun sonuna satır ekle (undo'suz programatik yol —
+        set_layer_rows / set_layer_stack tarafından kullanılır)."""
+        self._cmd_insert_row(self._layer_table.rowCount(), {
+            "tip": ltype, "alpha_deg": alpha, "fitil_mm": tow, "n_kat": n})
 
     def _del_row_by_widget(self, btn: QPushButton) -> None:
         # Satır indeksi ekleme/silme ile kaydığı için lambda'da yakalanan
@@ -963,8 +1090,8 @@ class EntegreTasarimPaneli(QWidget):
         tbl = self._layer_table
         for r in range(tbl.rowCount()):
             if tbl.cellWidget(r, COL_DEL) is btn:
-                tbl.removeRow(r)
-                self.tasarimDegisti.emit()
+                row_dict = self.get_layer_rows()[r]
+                self._push_cmd(DeleteRowCommand(self, r, row_dict))
                 return
 
     # ── CAM hesaplama ─────────────────────────────────────────────────────────
@@ -1154,10 +1281,26 @@ class EntegreTasarimPaneli(QWidget):
                 f.write(self._gcode_text)
             self._status_lbl.setText(f"Kaydedildi: {os.path.basename(path)}")
 
-    def _on_layer_item_changed(self, _item) -> None:
-        """Katman tablosu hücresi düzenlendi — kirli bayrağı tetikle."""
-        if not self._suppress_dirty:
+    def _on_layer_item_changed(self, item) -> None:
+        """Katman tablosu hücresi düzenlendi — undo komutu oluştur.
+
+        Eski değer öğenin UserRole verisinden okunur; komut uygulandığında
+        UserRole yeni değere güncellenir. Ardışık düzenlemeler
+        EditRowCellCommand.mergeWith ile tek komuta birleşir.
+        """
+        if self._suppress_dirty or item is None:
+            return
+        new_text = item.text()
+        old_text = item.data(Qt.UserRole)
+        if old_text is None:
+            # İlk kayıt — sadece son bilinen değeri başlat
+            item.setData(Qt.UserRole, new_text)
             self.tasarimDegisti.emit()
+            return
+        if str(old_text) == new_text:
+            return
+        self._push_cmd(EditRowCellCommand(
+            self, item.row(), item.column(), str(old_text), new_text))
 
     # ── Proje kalıcılığı (Schema v2.0) ────────────────────────────────────────
 
@@ -1276,6 +1419,8 @@ class EntegreTasarimPaneli(QWidget):
                 self.set_layer_rows(katmanlar)
         finally:
             self._suppress_dirty = False
+            # Bayat 'old' değerleriyle undo komutu üretilmesin
+            self._refresh_param_cache()
 
     # ── Dış panel entegrasyonu ────────────────────────────────────────────────
 

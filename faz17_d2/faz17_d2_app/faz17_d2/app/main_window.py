@@ -12,7 +12,7 @@ import math, queue, sys, os, threading
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSettings, QTimer, Slot
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (QMainWindow, QTabWidget, QToolBar, QStatusBar,
     QLabel, QApplication, QMessageBox)
 
@@ -130,6 +130,11 @@ class FilamentWindingApp(QMainWindow):
                 continue
 
     def _build_ui(self):
+        # Merkezi Undo/Redo yığını (Faz 25 Sprint 2) — panellerden ÖNCE
+        # kurulur ki paneller set_undo_stack ile bağlanabilsin
+        self._undo_stack = QUndoStack(self)
+        self._undo_stack.setUndoLimit(100)
+
         # Central widget: tab container
         self._tabs = QTabWidget()
         self._tabs.setDocumentMode(True)
@@ -198,6 +203,16 @@ class FilamentWindingApp(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        # Düzenle menüsü — Undo/Redo (Faz 25 Sprint 2)
+        edit_menu = menu.addMenu("Dü&zenle")
+        self._undo_act = self._undo_stack.createUndoAction(self, "Geri Al")
+        self._undo_act.setShortcut(QKeySequence.Undo)        # Ctrl+Z
+        edit_menu.addAction(self._undo_act)
+        self._redo_act = self._undo_stack.createRedoAction(self, "Yinele")
+        self._redo_act.setShortcuts(
+            [QKeySequence("Ctrl+Y"), QKeySequence.Redo])     # Ctrl+Y (+platform)
+        edit_menu.addAction(self._redo_act)
+
         # View menu — tab selection
         view_menu = menu.addMenu("&Görünüm")
         for i in range(self._tabs.count()):
@@ -218,6 +233,9 @@ class FilamentWindingApp(QMainWindow):
         tb.setObjectName("MainToolBar")
         tb.setMovable(False)
         self.addToolBar(tb)
+        tb.addAction(self._undo_act)   # ↶ Geri Al
+        tb.addAction(self._redo_act)   # ↷ Yinele
+        tb.addSeparator()
         connect_act = QAction("Bağlan", self)
         connect_act.triggered.connect(self._on_connect)
         tb.addAction(connect_act)
@@ -280,6 +298,21 @@ class FilamentWindingApp(QMainWindow):
             self._panel_proje.mark_dirty_external)
         # Kirli bayrak → pencere başlığında "*" göstergesi
         self._panel_proje.degisiklikDurumu.connect(self._on_proje_dirty_changed)
+
+        # ── Sprint 2: Merkezi Undo/Redo ──────────────────────────────────────
+        self._panel_katman.set_undo_stack(self._undo_stack)
+        self._panel_entegre.set_undo_stack(self._undo_stack)
+        # Her komut push/undo/redo'da: yığın temiz değilse projeyi kirli
+        # işaretle. (cleanChanged yerine indexChanged: geçiş kaçırılsa bile
+        # sonraki her komut işaretlemeyi tekrar dener.)
+        # Not: undo ile temiz indekse dönüş kirli bayrağı SİLMEZ — form
+        # düzenlemeleri undo yığını dışında kalır (muhafazakâr davranış).
+        self._undo_stack.indexChanged.connect(self._on_undo_index_changed)
+        # Kayıt başarısı (degisiklikDurumu False) → undo yığını temiz noktası
+        self._panel_proje.degisiklikDurumu.connect(self._on_proje_saved_sync)
+        # Proje yükleme → eski projeye ait komutlar geçersiz; yığını boşalt
+        self._panel_proje.projeYuklendi.connect(
+            lambda *_: self._undo_stack.clear())
 
         # Malzeme kütüphanesi → katman yöneticileri
         self._panel_malzeme.malzemeSecildi.connect(
@@ -768,6 +801,17 @@ class FilamentWindingApp(QMainWindow):
         """Kirli bayrak değişimi → pencere başlığını güncelle."""
         base = "Filament Sarma Kontrolü"
         self.setWindowTitle(f"* {base}" if dirty else base)
+
+    def _on_undo_index_changed(self, _index: int) -> None:
+        """Undo yığını temiz noktada değil → proje kirli."""
+        if not self._undo_stack.isClean():
+            self._panel_proje.mark_dirty_external()
+
+    def _on_proje_saved_sync(self, dirty: bool) -> None:
+        """Kayıt sonrası (dirty=False) undo yığınının temiz noktasını
+        mevcut indekse taşı — 'kaydedilmiş durum' ile senkron kalır."""
+        if not dirty:
+            self._undo_stack.setClean()
 
     def closeEvent(self, ev):
         """Async-safe shutdown."""
