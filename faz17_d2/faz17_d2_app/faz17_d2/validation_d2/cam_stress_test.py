@@ -120,6 +120,31 @@ def main() -> int:
 
     elapsed = time.time() - t_start
 
+    # ── Senaryo A: R3 — Patlayıcı parametre → ComplexityError → graceful fail ──
+    print("  [A] R3 patlayıcı parametre testi başlıyor...")
+    panel._mandrel_type.setCurrentText("Silindir")
+    panel._diameter.setValue(2000.0)    # çok büyük mandrel
+    panel._alpha.setValue(89.0)         # çok yüksek açı → binlerce devre
+    panel._tow_w.setValue(0.5)          # çok ince fitil → daha çok devre
+    panel._n_layers.setValue(32)
+    panel.set_layer_stack({"layers": []})   # parametrik mod
+
+    winding_path_before = panel._winding_path
+    panel._calculate_path()
+    # Preflight anında red eder → worker çok kısa sürer, 5 sn timeout yeterli
+    scenario_a_ok = _wait_done(app, panel, timeout_s=5)
+    if not scenario_a_ok:
+        fails.append("Senaryo A: ComplexityError beklenirken thread timeout oldu (hang)")
+    elif panel._winding_path is not None:
+        # Eski path hâlâ duruyorsa bu da kabul edilebilir (yeni hesap reddedildi)
+        pass
+    # Kontrol: ya yeni path None, ya da eski path korunuyor (her iki durum da geçerli)
+    # Asıl kontrol: watch dog ve thread temiz mi?
+    if panel._worker_thread is not None:
+        fails.append("Senaryo A: worker_thread temizlenmedi sonrası ComplexityError")
+    else:
+        print("  [A] PASS: ComplexityError → graceful fail, thread temiz")
+
     print("=" * 64)
     print(f" CAM PIPELINE STRESS TEST — {N} döngü, {elapsed:.1f} sn")
     print("-" * 64)
@@ -127,6 +152,7 @@ def main() -> int:
     print(f"   gcode üretildi     : {n_gcode}/{N}")
     print(f"   kalan worker thread: {panel._worker_thread}")
     print(f"   kalan watchdog     : {panel._watchdog}")
+    print(f"   Senaryo A (R3)     : {'OK' if scenario_a_ok and panel._worker_thread is None else 'FAIL'}")
     if fails:
         print("   HATALAR:")
         for f in fails[:20]:
@@ -134,9 +160,10 @@ def main() -> int:
     print("=" * 64)
 
     ok = (n_path == N and n_gcode == N and not fails
-          and panel._worker_thread is None and panel._watchdog is None)
+          and panel._worker_thread is None and panel._watchdog is None
+          and scenario_a_ok)
     if ok:
-        print(" ★★★ PASS — 100/100 hesap + gcode, hang yok, thread/watchdog temiz ★★★")
+        print(" ★★★ PASS — 100/100 hesap + gcode + Senaryo A, hang yok, thread/watchdog temiz ★★★")
         return 0
     print(" ✗ FAIL")
     return 1

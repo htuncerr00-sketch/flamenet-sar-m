@@ -63,6 +63,14 @@ def _make_backend():
     return MandrelProfile, WindingPathParams, generate_path, plan_motion, MachineConfig, generate_gcode
 
 
+def _import_preflight():
+    """R3: Preflight fonksiyonlarını içe aktar (ayrı tutulur — test izolasyonu için)."""
+    from backend.core.path_generator import (
+        preflight_check, preflight_check_stack, ComplexityError,
+    )
+    return preflight_check, preflight_check_stack, ComplexityError
+
+
 class _Worker(QObject):
     """Arka planda yol hesaplaması (R1: yalnızca düz _CalcParams alır).
 
@@ -522,6 +530,7 @@ class CAMPanel(QWidget):
     def _do_calculate(self, req: _CalcParams):
         """R1: yalnızca düz `req` okunur — hiçbir Qt widget erişimi yok."""
         MandrelProfile, WindingPathParams, generate_path, plan_motion, MachineConfig, generate_gcode = _make_backend()
+        preflight_check, preflight_check_stack, ComplexityError = _import_preflight()
         import math as _math
 
         log.info("[CAM] params received: mandrel=%s D=%.1f L=%.1f alpha=%.1f "
@@ -543,6 +552,50 @@ class CAMPanel(QWidget):
             profile = MandrelProfile.dome_cylinder_dome(l_mm, r_mm, req.dome_h_mm)
         else:
             profile = MandrelProfile.from_stl(req.stl_path)
+
+        # ── R3: Preflight kompleksite denetimi ───────────────────────────────────
+        _stack_pre = req.stack_dict
+        if _stack_pre and _stack_pre.get("layers"):
+            # Çok-katmanlı: her katman K1+K2a, ardından toplam K2b
+            _layer_params = []
+            for _layer in _stack_pre["layers"]:
+                _ltype  = _layer.get("layer_type") or _layer.get("type", "helical")
+                _alpha  = float(_layer.get("alpha_deg", req.alpha_deg))
+                if _ltype == "hoop":
+                    _alpha = 88.0
+                elif _ltype == "polar":
+                    _alpha = min(max(_alpha, 5.0), 20.0)
+                _layer_params.append(WindingPathParams(
+                    profile      = profile,
+                    alpha_deg    = _alpha,
+                    n_layers     = 1,
+                    tow_width_mm = float(_layer.get("fitil_genisligi_mm", req.tow_w_mm)),
+                    overlap_pct  = float(_layer.get("cakisma_pct", req.overlap_pct)),
+                ))
+            _ests = preflight_check_stack(_layer_params)   # ComplexityError fırlatabilir
+            log.info("[CAM] preflight OK (stack %d katman): %d toplam nokta",
+                     len(_ests), sum(e.points_per_layer for e in _ests))
+        else:
+            # Parametrik: strateji → gerçek alpha, tek preflight çağrısı
+            _salpha = req.alpha_deg
+            if req.strategy_text == "Çevre":
+                _salpha = 88.0
+            elif req.strategy_text == "Kutupsal":
+                _salpha = min(max(req.alpha_deg, 5.0), 20.0)
+            _pp_pre = WindingPathParams(
+                profile      = profile,
+                alpha_deg    = _salpha,
+                n_layers     = req.n_layers,
+                tow_width_mm = req.tow_w_mm,
+                overlap_pct  = req.overlap_pct,
+            )
+            _est = preflight_check(_pp_pre)   # ComplexityError fırlatabilir
+            log.info("[CAM] preflight OK: %d devre/kat, %d nokta/kat, "
+                     "%d toplam, %.1f MB, ~%.0f sn",
+                     _est.n_circuits_per_layer, _est.points_per_layer,
+                     _est.total_points, _est.estimated_memory_mb,
+                     _est.estimated_runtime_s)
+        # ── /R3 Preflight ─────────────────────────────────────────────────────────
 
         # ── Çok katmanlı mod (Manuel Dizilim'den yığın geldi) ────────────────
         stack = req.stack_dict

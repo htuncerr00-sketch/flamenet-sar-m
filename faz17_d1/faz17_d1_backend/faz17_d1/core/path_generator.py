@@ -25,6 +25,50 @@ import numpy as np
 from .geometry_engine import MandrelProfile
 
 
+# ── R3: Kompleksite koruma — sabitler, tip ve limitler ───────────────────────
+
+class ComplexityError(ValueError):
+    """
+    Yol hesaplama parametreleri güvenli limiti aşıyor.
+
+    Worker thread'den fırlatılır; `_on_path_error` sinyali ile ana thread'e
+    iletilir ve kullanıcıya `QMessageBox.critical()` ile gösterilir.
+    Mesaj daima Türkçe ve eyleme dönüştürülebilir öneriler içerir.
+    """
+
+
+_MAX_CIRCUITS_PER_LAYER: int   = 2_000        # K1: tek kat başına devre üst sınırı
+_MAX_POINTS_PER_LAYER: int     = 100_000       # K2a: tek kat başına WindingPoint üst sınırı
+_MAX_TOTAL_POINTS: int         = 250_000       # K2b: tüm katmanlar toplamı WindingPoint sınırı
+_MAX_PATH_LENGTH_MM: float     = 5_000_000.0  # 5 km fiber — son savunma hattı
+
+
+@dataclass
+class ComplexityEstimate:
+    """
+    `estimate_complexity()` tarafından döndürülen preflight özeti.
+
+    Alanlar
+    -------
+    n_circuits_per_layer  : Clairaut formülünden tek kat devre sayısı
+    n_layers              : `params.n_layers` — kat sayısı
+    total_circuits        : n_circuits_per_layer × n_layers
+    points_per_layer      : n_circuits_per_layer × n_steps_per_pass  [K2a ile karşılaştırılır]
+    total_points          : total_circuits × n_steps_per_pass         [K2b ile karşılaştırılır]
+    estimated_memory_mb   : WindingPath nesnesi için tahmini bellek (MB)
+    estimated_runtime_s   : Ampirik hesaplama süresi tahmini (sn)
+    estimated_fiber_length_mm : Toplam fiber uzunluğu tahmini (mm)
+    """
+    n_circuits_per_layer: int
+    n_layers: int
+    total_circuits: int
+    points_per_layer: int
+    total_points: int
+    estimated_memory_mb: float
+    estimated_runtime_s: float
+    estimated_fiber_length_mm: float
+
+
 @dataclass
 class WindingPathParams:
     """Sarma yolu oluşturmak için tüm parametreler."""
@@ -146,6 +190,147 @@ def clairaut_circuit_count(r_avg_mm: float, alpha_rad: float,
     sin_a = math.sin(alpha_rad)
     n_ideal = 2.0 * math.pi * r_avg_mm * sin_a / eff_width
     return max(1, math.ceil(n_ideal))
+
+
+def estimate_complexity(params: "WindingPathParams") -> ComplexityEstimate:
+    """
+    Yol kompleksitesini parametre düzeyinde tahmin et — iç döngü çalışmaz.
+
+    Çağrı süresi: ~1 µs (saf matematik, `WindingPoint` oluşturulmaz).
+    Hem ana thread hem worker thread'den çağrılabilir.
+
+    Fiber uzunluğu tahmini:
+        fiber_per_pass ≈ L_eff / sin(α)   (geodezik geçiş alt tahmini)
+        est_fiber_mm   = total_circuits × fiber_per_pass
+    """
+    r_avg     = params.profile.avg_radius_mm
+    alpha_rad = math.radians(max(float(params.alpha_deg), 1.0))
+
+    n_circ       = clairaut_circuit_count(r_avg, alpha_rad,
+                                          params.tow_width_mm, params.overlap_pct)
+    total_circ   = n_circ * params.n_layers
+    pts_per_lay  = n_circ * params.n_steps_per_pass
+    total_pts    = total_circ * params.n_steps_per_pass
+
+    mem_mb    = total_pts * 56 / 1_000_000   # WindingPoint ≈ 56 byte
+    runtime_s = total_pts / 30_000            # ~30 k pt/sn ampirik oran
+
+    L_eff            = float(params.profile.length_mm)
+    fiber_per_pass   = L_eff / math.sin(alpha_rad)
+    est_fiber_mm     = total_circ * fiber_per_pass
+
+    return ComplexityEstimate(
+        n_circuits_per_layer      = n_circ,
+        n_layers                  = params.n_layers,
+        total_circuits            = total_circ,
+        points_per_layer          = pts_per_lay,
+        total_points              = total_pts,
+        estimated_memory_mb       = mem_mb,
+        estimated_runtime_s       = runtime_s,
+        estimated_fiber_length_mm = est_fiber_mm,
+    )
+
+
+def preflight_check(params: "WindingPathParams") -> ComplexityEstimate:
+    """
+    Dört basamaklı limit denetimi — herhangi bir aşımda `ComplexityError` fırlatır.
+
+    Denetim sırası (hangi limit önce aşılırsa o raporlanır):
+    1. Devre/kat limiti     (K1 = 2,000)    — fitil/açı problemi
+    2. Nokta/kat limiti     (K2a = 100,000) — katman bazı limit
+    3. Toplam nokta limiti  (K2b = 250,000) — proje bazı limit
+    4. Fiber uzunluk limiti (5,000 m)       — son savunma hattı
+
+    Dönen `ComplexityEstimate` nesnesi `preflight_check_stack()` tarafından
+    toplam nokta hesabında yeniden kullanılır.
+    """
+    est = estimate_complexity(params)
+
+    if est.n_circuits_per_layer > _MAX_CIRCUITS_PER_LAYER:
+        raise ComplexityError(
+            f"Devre sayısı çok yüksek: {est.n_circuits_per_layer:,} devre/kat "
+            f"(limit: {_MAX_CIRCUITS_PER_LAYER:,}).\n\n"
+            f"Mevcut parametreler:\n"
+            f"  • Ortalama mandrel yarıçapı: {params.profile.avg_radius_mm:.0f} mm\n"
+            f"  • Sarma açısı: {params.alpha_deg:.1f}°\n"
+            f"  • Fitil genişliği: {params.tow_width_mm:.1f} mm\n"
+            f"  • Çakışma: {params.overlap_pct:.0f}%\n\n"
+            f"Öneri: fitil genişliğini artırın "
+            f"({params.tow_width_mm:.1f} mm → {params.tow_width_mm * 1.5:.0f} mm deneyin) "
+            f"ya da sarma açısını düşürün."
+        )
+
+    if est.points_per_layer > _MAX_POINTS_PER_LAYER:
+        raise ComplexityError(
+            f"Katman bazı nokta sayısı çok yüksek: {est.points_per_layer:,} nokta/kat "
+            f"(limit: {_MAX_POINTS_PER_LAYER:,}).\n\n"
+            f"  • {est.n_circuits_per_layer:,} devre × {params.n_steps_per_pass} adım "
+            f"= {est.points_per_layer:,} nokta/kat\n\n"
+            f"Öneri: fitil genişliğini artırın ya da sarma açısını düşürün."
+        )
+
+    if est.total_points > _MAX_TOTAL_POINTS:
+        raise ComplexityError(
+            f"Proje bazı toplam nokta sayısı çok yüksek: {est.total_points:,} nokta "
+            f"(limit: {_MAX_TOTAL_POINTS:,}).\n\n"
+            f"  • {est.n_circuits_per_layer:,} devre/kat × {params.n_layers} kat × "
+            f"{params.n_steps_per_pass} adım = {est.total_points:,} nokta\n\n"
+            f"Öneri: kat sayısını azaltın "
+            f"({params.n_layers} → {max(1, params.n_layers // 2)}) "
+            f"ya da fitil genişliğini artırın."
+        )
+
+    if est.estimated_fiber_length_mm > _MAX_PATH_LENGTH_MM:
+        fiber_km = est.estimated_fiber_length_mm / 1_000_000
+        limit_km = _MAX_PATH_LENGTH_MM / 1_000_000
+        raise ComplexityError(
+            f"Tahmini fiber uzunluğu çok yüksek: {fiber_km:.1f} km "
+            f"(limit: {limit_km:.0f} km).\n"
+            f"Kat sayısını veya mandrel boyutunu azaltın."
+        )
+
+    return est
+
+
+def preflight_check_stack(layer_params: List["WindingPathParams"]) -> List[ComplexityEstimate]:
+    """
+    Çok-katmanlı (stack dict) mod için preflight denetimi.
+
+    Her katman için `preflight_check()` çağrılır — katman bazı limitler denetlenir.
+    Ardından tüm katmanların `points_per_layer` toplamı proje bazı limitle kıyaslanır.
+
+    Parametreler
+    ------------
+    layer_params : Her elemanı `n_layers=1` ile oluşturulmuş `WindingPathParams` listesi.
+
+    Döner
+    -----
+    Her katmana karşılık `ComplexityEstimate` listesi.
+
+    Fırlatır
+    --------
+    ComplexityError : Herhangi bir katman VEYA proje toplamı limiti aşılırsa.
+    """
+    estimates: List[ComplexityEstimate] = []
+    total_pts = 0
+
+    for i, p in enumerate(layer_params):
+        est = preflight_check(p)   # K1 + K2a + K4 — katman başına denetim
+        estimates.append(est)
+        total_pts += est.points_per_layer
+
+    if total_pts > _MAX_TOTAL_POINTS:
+        n_lay = len(layer_params)
+        avg   = total_pts // max(n_lay, 1)
+        raise ComplexityError(
+            f"Proje bazı toplam nokta sayısı çok yüksek: {total_pts:,} nokta "
+            f"(limit: {_MAX_TOTAL_POINTS:,}).\n\n"
+            f"  • {n_lay} katman, ortalama {avg:,} nokta/katman\n\n"
+            f"Öneri: katman dizilimindeki kat sayısını azaltın "
+            f"ya da fitil genişliğini artırın."
+        )
+
+    return estimates
 
 
 def find_turnaround_z_left(profile: MandrelProfile,
