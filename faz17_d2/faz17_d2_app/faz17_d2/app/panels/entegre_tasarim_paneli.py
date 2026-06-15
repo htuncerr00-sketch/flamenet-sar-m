@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from dataclasses import dataclass as _dataclass
 from typing import Optional, List
 
 import numpy as np
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QFileDialog, QTextEdit, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QTabWidget, QScrollArea,
     QSizePolicy, QFrame, QProgressBar, QMessageBox, QApplication,
+    QSlider,
 )
 import pyqtgraph.opengl as gl
 from pyqtgraph.Qt import QtGui
@@ -277,9 +279,9 @@ def _path_to_3d_lines(path_points, z_mm_profile, r_mm_profile) -> List[np.ndarra
         if len(pts_3d) < 2:
             continue
         arr = np.array(pts_3d, dtype=np.float32)
-        # Downsample for performance
-        if len(arr) > 4000:
-            step = len(arr) // 4000 + 1
+        # Downsample for performance (8000 pts for smoother rope curves)
+        if len(arr) > 8000:
+            step = len(arr) // 8000 + 1
             arr = arr[::step]
         result.append(arr)
 
@@ -361,7 +363,7 @@ class _MachineGLView(gl.GLViewWidget):
             if len(pts) < 2:
                 continue
             col = _FIBER_COLORS[i % len(_FIBER_COLORS)]
-            line = gl.GLLinePlotItem(pos=pts, color=col, width=1.5, antialias=True)
+            line = gl.GLLinePlotItem(pos=pts, color=col, width=4.0, antialias=True, mode='line_strip')
             self.addItem(line)
             self._fiber_items.append(line)
 
@@ -369,6 +371,21 @@ class _MachineGLView(gl.GLViewWidget):
         for item in self._fiber_items:
             self.removeItem(item)
         self._fiber_items.clear()
+
+    def set_head_position(self, xyz: np.ndarray) -> None:
+        """Sarım kafası (winding head) işaretçisini güncelle."""
+        if not hasattr(self, '_head_item') or self._head_item is None:
+            self._head_item = gl.GLScatterPlotItem(
+                pos=np.array([[0, 0, 0]], dtype=np.float32),
+                size=12, color=(1.0, 0.9, 0.0, 1.0), pxMode=True
+            )
+            self.addItem(self._head_item)
+        self._head_item.setData(pos=np.array([xyz], dtype=np.float32))
+
+    def clear_head(self) -> None:
+        if hasattr(self, '_head_item') and self._head_item is not None:
+            self.removeItem(self._head_item)
+            self._head_item = None
 
     # ── İç rebuild ───────────────────────────────────────────────────────────
 
@@ -427,24 +444,50 @@ class _MachineGLView(gl.GLViewWidget):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Arka plan hesaplama işçisi
+# R1: Worker thread parametreleri — hiçbir Qt nesnesi içermez
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class _CalcWorker(QObject):
-    finished = Signal(object, object, object)  # (path, profile, layer_paths_or_None)
-    error    = Signal(str)
+@_dataclass
+class _ECalcParams:
+    """R1: Worker thread'e geçen düz parametreler — hiçbir Qt nesnesi içermez."""
+    mandrel_type: str
+    diameter_mm: float
+    length_mm: float
+    cone_angle_deg: float
+    dome_h_mm: float
+    dome_hr_ratio: float
+    stl_path: object  # str or None
+    alpha_deg: float
+    n_layers: int
+    tow_w_mm: float
+    overlap_pct: float
+    strategy_text: str
+    feed_mm_s: float
+    spindle_rpm: float
+    friction_mu: float
+    layer_rows: list  # list of plain dicts from get_layer_rows() — deepcopy
 
-    def __init__(self, fn, *args):
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Arka plan hesaplama işçisi (nesil tabanlı iptal desteğiyle)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _EWorker(QObject):
+    finished = Signal(object, object, object, int)  # (path, profile, all_paths, gen)
+    error    = Signal(str, int)                      # (msg, gen)
+
+    def __init__(self, fn, params: "_ECalcParams", gen: int):
         super().__init__()
-        self._fn = fn
-        self._args = args
+        self._fn     = fn
+        self._params = params
+        self._gen    = gen
 
     def run(self):
         try:
-            r = self._fn(*self._args)
-            self.finished.emit(*r)
+            result = self._fn(self._params)
+            self.finished.emit(*result, self._gen)
         except Exception as exc:
-            self.error.emit(str(exc))
+            self.error.emit(f"{type(exc).__name__}: {exc}", self._gen)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -535,6 +578,9 @@ class EntegreTasarimPaneli(QWidget):
     # fırlatılır — proje yöneticisi kirli bayrağı için dinler.
     tasarimDegisti = Signal()
 
+    # Watchdog zaman aşımı (ms)
+    _WATCHDOG_MS = 30_000
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._stl_path: Optional[str] = None
@@ -542,6 +588,9 @@ class EntegreTasarimPaneli(QWidget):
         self._profile      = None
         self._gcode_text   = ""
         self._worker_thread: Optional[QThread] = None
+        self._calc_gen: int = 0
+        self._watchdog = None
+        self._worker_ref = None
         self._backend = _try_backend()
         self._backend_ok = self._backend[0] is not None
         # Proje yükleme sırasında tasarimDegisti fırlatılmasın
@@ -551,6 +600,13 @@ class EntegreTasarimPaneli(QWidget):
         self._undo_stack = None
         self._build_ui()
         self._init_param_tracking()
+        # Animasyon durumu
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(33)  # ~30 FPS
+        self._anim_timer.timeout.connect(self._anim_tick)
+        self._anim_xyz: object = None   # np.ndarray (N,3) veya None
+        self._anim_idx: int = 0
+        self._anim_playing: bool = False
 
     # ── UI inşası ─────────────────────────────────────────────────────────────
 
@@ -773,6 +829,45 @@ class EntegreTasarimPaneli(QWidget):
             f"color:{COLOR['text_secondary']};font-size:11px;padding:2px;")
         self._status_lbl.setWordWrap(True)
         v.addWidget(self._status_lbl)
+
+        # ── Animasyon Kontrolleri ──────────────────────────────────────────────
+        grp_anim = QGroupBox("▶ Sarma Animasyonu")
+        grp_anim.setStyleSheet(_S_GRP)
+        ga_v = QVBoxLayout(grp_anim)
+        ga_v.setContentsMargins(8, 16, 8, 8)
+        ga_v.setSpacing(5)
+
+        anim_btn_row = QHBoxLayout()
+        self._btn_play = QPushButton("▶ Oynat")
+        self._btn_play.setStyleSheet(_S_BTN_PRI)
+        self._btn_play.setEnabled(False)
+        self._btn_play.clicked.connect(self._on_anim_play)
+        self._btn_pause = QPushButton("⏸ Duraklat")
+        self._btn_pause.setStyleSheet(_S_BTN_PRI)
+        self._btn_pause.setEnabled(False)
+        self._btn_pause.clicked.connect(self._on_anim_pause)
+        self._btn_reset_anim = QPushButton("⏹ Sıfırla")
+        self._btn_reset_anim.setStyleSheet(_S_BTN_PRI)
+        self._btn_reset_anim.setEnabled(False)
+        self._btn_reset_anim.clicked.connect(self._on_anim_reset)
+        anim_btn_row.addWidget(self._btn_play)
+        anim_btn_row.addWidget(self._btn_pause)
+        anim_btn_row.addWidget(self._btn_reset_anim)
+        ga_v.addLayout(anim_btn_row)
+
+        self._anim_slider = QSlider(Qt.Horizontal)
+        self._anim_slider.setRange(0, 1000)
+        self._anim_slider.setValue(0)
+        self._anim_slider.setEnabled(False)
+        self._anim_slider.sliderMoved.connect(self._on_anim_seek)
+        ga_v.addWidget(self._anim_slider)
+
+        self._anim_lbl = QLabel("Sarım kafası: —")
+        self._anim_lbl.setStyleSheet(
+            f"color:{COLOR['text_secondary']};font-size:10px;")
+        ga_v.addWidget(self._anim_lbl)
+
+        v.addWidget(grp_anim)
 
         v.addStretch()
 
@@ -1096,42 +1191,122 @@ class EntegreTasarimPaneli(QWidget):
 
     # ── CAM hesaplama ─────────────────────────────────────────────────────────
 
+    def _collect_params(self) -> "_ECalcParams":
+        """R1: Tüm widget değerlerini ana thread'de topla."""
+        import copy
+        rows = copy.deepcopy(self.get_layer_rows())
+        return _ECalcParams(
+            mandrel_type   = self._cb_type.currentText(),
+            diameter_mm    = self._sp_diam.value(),
+            length_mm      = self._sp_len.value(),
+            cone_angle_deg = self._sp_cone.value(),
+            dome_h_mm      = self._sp_dome.value(),
+            dome_hr_ratio  = self._sp_dome_hr.value(),
+            stl_path       = self._stl_path,
+            alpha_deg      = self._sp_alpha.value(),
+            n_layers       = self._sp_nlayers.value(),
+            tow_w_mm       = self._sp_tow.value(),
+            overlap_pct    = self._sp_overlap.value(),
+            strategy_text  = self._cb_strat.currentText(),
+            feed_mm_s      = self._sp_feed.value(),
+            spindle_rpm    = self._sp_rpm.value(),
+            friction_mu    = self._sp_friction.value(),
+            layer_rows     = rows,
+        )
+
     def _on_calculate(self) -> None:
         if self._worker_thread and self._worker_thread.isRunning():
             return
+
+        # R1: tüm widget değerlerini ana thread'de topla, worker'a DÜZLÜK ver
+        params = self._collect_params()
+
+        self._calc_gen += 1
+        gen = self._calc_gen
+
         self._progress.setVisible(True)
         self._btn_calc.setEnabled(False)
+        self._btn_gcode.setEnabled(False)
         self._status_lbl.setText("Hesaplanıyor…")
         self._gl.clear_fiber_paths()
+        self._stop_anim()
 
-        thread = QThread()
-        worker = _CalcWorker(self._do_calculate)
+        thread = QThread(self)
+        worker = _EWorker(self._do_calculate, params, gen)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
         worker.finished.connect(self._on_calc_done)
         worker.error.connect(self._on_calc_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_thread_cleanup)
         self._worker_thread = thread
+        self._worker_ref = worker
+        self._start_watchdog(gen)
         thread.start()
 
-    def _do_calculate(self):
+    # ── Watchdog yönetimi ─────────────────────────────────────────────────────
+
+    def _start_watchdog(self, gen: int) -> None:
+        self._stop_watchdog()
+        wd = QTimer(self)
+        wd.setSingleShot(True)
+        wd.timeout.connect(lambda g=gen: self._on_calc_timeout(g))
+        wd.start(self._WATCHDOG_MS)
+        self._watchdog = wd
+
+    def _stop_watchdog(self) -> None:
+        if self._watchdog is not None:
+            self._watchdog.stop()
+            self._watchdog.deleteLater()
+            self._watchdog = None
+
+    def _on_thread_cleanup(self) -> None:
+        self._worker_thread = None
+        self._worker_ref = None
+
+    def _on_calc_timeout(self, gen: int) -> None:
+        if gen != self._calc_gen:
+            return
+        if self._worker_thread is None or not self._worker_thread.isRunning():
+            return
+        self._calc_gen += 1
+        self._progress.setVisible(False)
+        self._btn_calc.setEnabled(True)
+        self._status_lbl.setText(
+            f"Zaman aşımı: {self._WATCHDOG_MS // 1000} sn içinde tamamlanamadı.")
+        try:
+            self._worker_thread.quit()
+        except Exception:
+            pass
+
+    def _do_calculate(self, params: "_ECalcParams"):
+        """R1: yalnızca düz params okunur — hiçbir Qt widget erişimi yok."""
         (MandrelProfile, WindingPathParams, generate_path,
          plan_motion, MachineConfig, generate_gcode) = self._backend
-
         if MandrelProfile is None:
             raise RuntimeError(
-                "Backend modülleri yüklenemedi.\n"
-                "Lütfen uygulamayı faz17_d2/ dizininden başlatın.")
+                "Backend modülleri yüklenemedi. faz17_d2/ dizininden başlatın.")
 
-        d_mm = self._sp_diam.value()
-        l_mm = self._sp_len.value()
-        t    = self._cb_type.currentText()
-        dh   = self._sp_dome.value()
-        ca   = self._sp_cone.value()
+        # R3: preflight import
+        try:
+            from backend.core.path_generator import (
+                preflight_check, preflight_check_stack, ComplexityError,
+            )
+            _have_preflight = True
+        except Exception:
+            _have_preflight = False
 
         import math as _m
+
+        d_mm = params.diameter_mm
+        l_mm = params.length_mm
+        t    = params.mandrel_type
+        dh   = params.dome_h_mm
+        ca   = params.cone_angle_deg
+
         if t == "Silindir":
             profile = MandrelProfile.cylinder(l_mm, d_mm / 2.0)
         elif t == "Konik":
@@ -1141,78 +1316,88 @@ class EntegreTasarimPaneli(QWidget):
             profile = MandrelProfile.dome_cylinder_dome(l_mm, d_mm / 2.0, dh)
         elif t == "Elipsoidal Kubbe":
             profile = MandrelProfile.ellipsoidal_dome_cylinder_dome(
-                l_mm, d_mm / 2.0, dome_hr_ratio=self._sp_dome_hr.value())
+                l_mm, d_mm / 2.0, dome_hr_ratio=params.dome_hr_ratio)
         else:
-            if not self._stl_path:
+            if not params.stl_path:
                 raise RuntimeError("STL dosyası seçilmedi.")
-            profile = MandrelProfile.from_stl(self._stl_path)
+            profile = MandrelProfile.from_stl(params.stl_path)
 
-        # Katman tablosundan dizilim oku (varsa)
-        tbl = self._layer_table
-        if tbl.rowCount() > 0:
+        # R3: Preflight — complexity gate
+        if _have_preflight and params.layer_rows:
+            _layer_params = []
+            strat_map = {"Sarmal": "helical", "Hoop": "hoop", "Polar": "polar"}
+            for row in params.layer_rows:
+                _ltype = strat_map.get(str(row.get("tip", "Sarmal")), "helical")
+                _alpha = float(row.get("alpha_deg", params.alpha_deg))
+                if _ltype == "hoop":
+                    _alpha = 88.0
+                elif _ltype == "polar":
+                    _alpha = min(max(_alpha, 5.0), 20.0)
+                _layer_params.append(WindingPathParams(
+                    profile=profile, alpha_deg=_alpha,
+                    n_layers=max(1, int(row.get("n_kat", 1))),
+                    tow_width_mm=float(row.get("fitil_mm", params.tow_w_mm)),
+                    overlap_pct=params.overlap_pct,
+                ))
+            preflight_check_stack(_layer_params)
+        elif _have_preflight:
+            _salpha = params.alpha_deg
+            _strat_pre = params.strategy_text
+            if "Çevre" in _strat_pre or "Hoop" in _strat_pre:
+                _salpha = 88.0
+            elif "Kutup" in _strat_pre or "Polar" in _strat_pre:
+                _salpha = min(max(_salpha, 5.0), 20.0)
+            preflight_check(WindingPathParams(
+                profile=profile, alpha_deg=_salpha,
+                n_layers=params.n_layers, tow_width_mm=params.tow_w_mm,
+                overlap_pct=params.overlap_pct,
+            ))
+
+        # Strateji eşleme
+        strat_map = {
+            "Sarmal (Helisel)": "helical", "Çevre (Hoop)": "hoop",
+            "Kutupsal": "polar", "Sarmal": "helical",
+            "Hoop": "hoop", "Polar": "polar",
+        }
+
+        if params.layer_rows:
             all_paths = []
-            for row in range(tbl.rowCount()):
-                cb = tbl.cellWidget(row, COL_TIP)
-                ltype = cb.currentText() if cb else "Sarmal"
-                try:
-                    alpha = float((tbl.item(row, COL_ALPHA) or
-                                   type('', (), {'text': lambda s: '55.0'})()).text())
-                except Exception:
-                    alpha = 55.0
-                try:
-                    tow_w = float((tbl.item(row, COL_TOW) or
-                                   type('', (), {'text': lambda s: '6.0'})()).text())
-                except Exception:
-                    tow_w = 6.0
-                try:
-                    n_l = int((tbl.item(row, COL_N) or
-                               type('', (), {'text': lambda s: '1'})()).text())
-                except Exception:
-                    n_l = 1
-
-                strat_map = {"Sarmal": "helical", "Hoop": "hoop", "Polar": "polar"}
-                strat = strat_map.get(ltype, "helical")
-
+            for row in params.layer_rows:
+                lt    = str(row.get("tip", "Sarmal"))
+                strat = strat_map.get(lt, "helical")
+                alpha = float(row.get("alpha_deg", params.alpha_deg))
+                if strat == "hoop":
+                    alpha = 88.0
+                tow   = float(row.get("fitil_mm", params.tow_w_mm))
+                n_l   = max(1, int(row.get("n_kat", 1)))
                 pp = WindingPathParams(
-                    profile=profile,
-                    alpha_deg=alpha,
-                    n_layers=max(1, n_l),
-                    tow_width_mm=tow_w,
-                    overlap_pct=self._sp_overlap.value(),
-                    feed_mm_s=self._sp_feed.value(),
-                    spindle_rpm=self._sp_rpm.value(),
-                    winding_strategy=strat,
-                    friction_mu=self._sp_friction.value(),
+                    profile=profile, alpha_deg=alpha, n_layers=n_l,
+                    tow_width_mm=tow, overlap_pct=params.overlap_pct,
+                    feed_mm_s=params.feed_mm_s, spindle_rpm=params.spindle_rpm,
+                    winding_strategy=strat, friction_mu=params.friction_mu,
                 )
                 path = generate_path(pp)
                 all_paths.append(path)
-
             first = all_paths[0] if all_paths else None
             return first, profile, all_paths
-        else:
-            # Tek-açı parametrik mod
-            strat_map = {
-                "Sarmal (Helisel)": "helical",
-                "Çevre (Hoop)":     "hoop",
-                "Kutupsal":         "polar",
-            }
-            strat = strat_map.get(self._cb_strat.currentText(), "helical")
-            pp = WindingPathParams(
-                profile=profile,
-                alpha_deg=self._sp_alpha.value(),
-                n_layers=self._sp_nlayers.value(),
-                tow_width_mm=self._sp_tow.value(),
-                overlap_pct=self._sp_overlap.value(),
-                feed_mm_s=self._sp_feed.value(),
-                spindle_rpm=self._sp_rpm.value(),
-                winding_strategy=strat,
-                friction_mu=self._sp_friction.value(),
-            )
-            path = generate_path(pp)
-            return path, profile, None
 
-    @Slot(object, object, object)
-    def _on_calc_done(self, path, profile, all_paths) -> None:
+        # Parametrik mod (katman tablosu boş)
+        strat = strat_map.get(params.strategy_text, "helical")
+        pp = WindingPathParams(
+            profile=profile, alpha_deg=params.alpha_deg,
+            n_layers=params.n_layers, tow_width_mm=params.tow_w_mm,
+            overlap_pct=params.overlap_pct, feed_mm_s=params.feed_mm_s,
+            spindle_rpm=params.spindle_rpm, winding_strategy=strat,
+            friction_mu=params.friction_mu,
+        )
+        path = generate_path(pp)
+        return path, profile, None
+
+    @Slot(object, object, object, int)
+    def _on_calc_done(self, path, profile, all_paths, gen) -> None:
+        if gen != self._calc_gen:
+            return
+        self._stop_watchdog()
         self._progress.setVisible(False)
         self._btn_calc.setEnabled(True)
         self._winding_path = path
@@ -1223,7 +1408,6 @@ class EntegreTasarimPaneli(QWidget):
             return
 
         try:
-            n_pts    = len(path.points)
             circuits = path.n_circuits
             fiber_m  = path.total_fiber_length_mm / 1000.0
             cov      = path.coverage_pct
@@ -1240,13 +1424,113 @@ class EntegreTasarimPaneli(QWidget):
         # 3D fiber yollarını güncelle
         self._gl.update_fiber_paths(profile, path)
         self._btn_gcode.setEnabled(True)
+        self._setup_animation(path, profile)
 
-    @Slot(str)
-    def _on_calc_error(self, msg: str) -> None:
+    @Slot(str, int)
+    def _on_calc_error(self, msg: str, gen: int) -> None:
+        if gen != self._calc_gen:
+            return
+        self._stop_watchdog()
         self._progress.setVisible(False)
         self._btn_calc.setEnabled(True)
-        self._status_lbl.setText(f"Hata: {msg}")
+        self._status_lbl.setText(f"Hata: {msg[:120]}")
         QMessageBox.warning(self, "Hesaplama Hatası", msg)
+
+    # ── Animasyon yönetimi ────────────────────────────────────────────────────
+
+    def _setup_animation(self, path, profile) -> None:
+        """Hesap tamamlandı — animasyon verilerini hazırla."""
+        self._stop_anim()
+        if path is None or not getattr(path, 'points', None):
+            return
+        try:
+            z_arr = np.asarray(profile.z_mm, dtype=np.float64)
+            r_arr = np.asarray(profile.r_mm, dtype=np.float64)
+            z_center = (z_arr[0] + z_arr[-1]) / 2.0
+            pts = path.points
+            # En fazla 2000 kare için örnekleme
+            step = max(1, len(pts) // 2000)
+            pts_sub = pts[::step]
+            xyz = []
+            for pt in pts_sub:
+                z_val = float(pt.x_mm)
+                a_rad = math.radians(float(pt.a_deg))
+                r_val = float(np.interp(z_val, z_arr, r_arr)) / 1000.0
+                xm = (z_val - z_center) / 1000.0 + (z_arr[-1] - z_arr[0]) / 2000.0
+                ym = r_val * math.cos(a_rad)
+                zm = r_val * math.sin(a_rad)
+                xyz.append([xm, ym, zm])
+            self._anim_xyz = np.array(xyz, dtype=np.float32) if xyz else None
+            self._anim_idx = 0
+            if self._anim_xyz is not None and len(self._anim_xyz) > 0:
+                self._btn_play.setEnabled(True)
+                self._btn_reset_anim.setEnabled(True)
+                self._anim_slider.setEnabled(True)
+                self._anim_slider.setValue(0)
+                self._gl.set_head_position(self._anim_xyz[0])
+        except Exception:
+            pass
+
+    def _on_anim_play(self) -> None:
+        if self._anim_xyz is None:
+            return
+        self._anim_playing = True
+        self._btn_pause.setEnabled(True)
+        self._anim_timer.start()
+
+    def _on_anim_pause(self) -> None:
+        self._anim_playing = False
+        self._anim_timer.stop()
+
+    def _stop_anim(self) -> None:
+        self._anim_timer.stop()
+        self._anim_playing = False
+        self._anim_xyz = None
+        self._anim_idx = 0
+        if hasattr(self, '_btn_play'):
+            self._btn_play.setEnabled(False)
+        if hasattr(self, '_btn_pause'):
+            self._btn_pause.setEnabled(False)
+        if hasattr(self, '_btn_reset_anim'):
+            self._btn_reset_anim.setEnabled(False)
+        if hasattr(self, '_anim_slider'):
+            self._anim_slider.setEnabled(False)
+            self._anim_slider.setValue(0)
+        if hasattr(self, '_anim_lbl'):
+            self._anim_lbl.setText("Sarım kafası: —")
+        if hasattr(self, '_gl'):
+            self._gl.clear_head()
+
+    def _on_anim_reset(self) -> None:
+        self._anim_timer.stop()
+        self._anim_playing = False
+        self._anim_idx = 0
+        if self._anim_xyz is not None and len(self._anim_xyz) > 0:
+            self._gl.set_head_position(self._anim_xyz[0])
+        self._anim_slider.setValue(0)
+
+    def _on_anim_seek(self, value: int) -> None:
+        if self._anim_xyz is None:
+            return
+        n = len(self._anim_xyz)
+        self._anim_idx = int(value / 1000.0 * (n - 1))
+        self._anim_idx = max(0, min(n - 1, self._anim_idx))
+        self._gl.set_head_position(self._anim_xyz[self._anim_idx])
+
+    def _anim_tick(self) -> None:
+        if self._anim_xyz is None:
+            self._anim_timer.stop()
+            return
+        n = len(self._anim_xyz)
+        step = max(1, n // 300)  # yaklaşık 10 saniyede tamamla
+        self._anim_idx = min(self._anim_idx + step, n - 1)
+        self._gl.set_head_position(self._anim_xyz[self._anim_idx])
+        slider_val = int(self._anim_idx / max(1, n - 1) * 1000)
+        self._anim_slider.setValue(slider_val)
+        self._anim_lbl.setText(f"Sarım kafası: nokta {self._anim_idx}/{n-1}")
+        if self._anim_idx >= n - 1:
+            self._anim_timer.stop()
+            self._anim_playing = False
 
     # ── G-kod üretimi ─────────────────────────────────────────────────────────
 

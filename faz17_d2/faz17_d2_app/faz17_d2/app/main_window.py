@@ -37,7 +37,6 @@ from app.panels.alarms import AlarmsPanel
 from app.panels.recipe_editor import RecipeEditor
 from app.panels.commissioning import CommissioningPanel
 from app.panels.predictive_maintenance import PredictiveMaintenancePanel
-from app.panels.cam_panel import CAMPanel
 from app.panels.proje_yoneticisi import ProjeYoneticisiPanel
 from app.panels.malzeme_kutuphanesi import MalzemeKutuphanesiPanel
 from app.panels.tabaka_yoneticisi import TabakaYoneticisiPanel
@@ -177,7 +176,6 @@ class FilamentWindingApp(QMainWindow):
         self._panel_katman   = KatmanDizilimPaneli()
         self._panel_uretim   = UretimTasarimPaneli()
         self._panel_entegre  = EntegreTasarimPaneli()
-        self._panel_cam      = CAMPanel()
         self._panel_live     = LiveProductionPanel()
         self._panel_3d       = Winding3DPanel()
         self._panel_3d.set_winding_params(WindingParams())
@@ -192,9 +190,8 @@ class FilamentWindingApp(QMainWindow):
         self._tabs.addTab(self._panel_malzeme, "Malzeme Kütüphanesi")
         self._tabs.addTab(self._panel_tabaka,  "Katman & Analiz")
         self._tabs.addTab(self._panel_katman,  "Manuel Dizilim")
-        self._tabs.addTab(self._panel_entegre, "🏭 Tasarım Merkezi")
+        self._tabs.addTab(self._panel_entegre, "🏭 CAM Tasarım Merkezi")
         self._tabs.addTab(self._panel_uretim,  "Üretim Tasarım Merkezi")
-        self._tabs.addTab(self._panel_cam,     "CAM Üretici")
         # ── Üretim & izleme sekmeleri ───────────────────────────────────────
         self._tabs.addTab(self._panel_live,        "Canlı Üretim")
         self._tabs.addTab(self._panel_3d,          "3D Görüntüleyici")
@@ -370,8 +367,6 @@ class FilamentWindingApp(QMainWindow):
         # "→ Üretime Gönder" butonu → üretim merkezi + CAM + entegre panel
         self._panel_katman.uretimeGonder.connect(
             self._panel_uretim.set_layer_stack)
-        self._panel_katman.uretimeGonder.connect(
-            self._panel_cam.set_layer_stack)
         self._panel_katman.uretimeGonder.connect(
             self._panel_entegre.set_layer_stack)
 
