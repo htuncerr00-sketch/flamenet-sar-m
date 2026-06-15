@@ -10,9 +10,11 @@ Sol taraf: 3D önizleme  |  Sağ taraf: parametreler + çıktı
 from __future__ import annotations
 import os
 import sys
+import logging
+from dataclasses import dataclass
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QObject
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTabWidget, QGroupBox, QLabel, QComboBox, QPushButton,
@@ -23,6 +25,33 @@ from PySide6.QtWidgets import (
 
 from .winding_3d import Winding3DPanel
 from ..themes.dark_industrial import COLOR
+
+log = logging.getLogger("faz17_d2.cam_panel")
+
+
+@dataclass
+class _CalcParams:
+    """Worker'a geçen DÜZ parametreler — hiçbir Qt nesnesi içermez (R1).
+
+    Tüm widget okumaları ANA THREAD'de `_collect_params()` ile bu yapıya
+    kopyalanır; worker thread yalnızca bu düz veriyi görür.
+    """
+    mandrel_type: str
+    diameter_mm: float
+    length_mm: float
+    cone_angle_deg: float
+    dome_h_mm: float
+    stl_path: Optional[str]
+    alpha_deg: float
+    n_layers: int
+    tow_w_mm: float
+    overlap_pct: float
+    strategy_text: str
+    feed_mm_s: float
+    rpm: float
+    x_min: float
+    x_max: float
+    stack_dict: Optional[dict]
 
 
 def _make_backend():
@@ -35,25 +64,36 @@ def _make_backend():
 
 
 class _Worker(QObject):
-    """Arka planda yol hesaplaması."""
-    finished = Signal(object, object, object)  # (WindingPath, profile, all_layer_paths_or_None)
-    error = Signal(str)
+    """Arka planda yol hesaplaması (R1: yalnızca düz _CalcParams alır).
 
-    def __init__(self, fn, *args):
+    `gen` (nesil), sinyalin İÇİNDE taşınır — böylece slot'lar bound-method
+    olarak doğrudan bağlanabilir (QueuedConnection → ANA THREAD'de çalışır).
+    Lambda sarmalayıcı KULLANILMAZ: lambda'nın QObject afinitesi olmadığından
+    Qt DirectConnection'a düşer ve slot worker thread'de çalışırdı (R1 ihlali).
+    """
+    finished = Signal(object, object, object, int)  # (path, profile, all_layer_paths, gen)
+    error = Signal(str, int)                         # (msg, gen)
+
+    def __init__(self, fn, params: "_CalcParams", gen: int):
         super().__init__()
         self._fn = fn
-        self._args = args
+        self._params = params
+        self._gen = gen
 
     def run(self):
+        log.info("[CAM] worker started (gen=%d)", self._gen)
         try:
-            result = self._fn(*self._args)
-            self.finished.emit(*result)
+            path, profile, all_layer_paths = self._fn(self._params)
+            self.finished.emit(path, profile, all_layer_paths, self._gen)
         except Exception as e:
-            self.error.emit(str(e))
+            log.exception("[CAM] worker error")
+            self.error.emit(f"{type(e).__name__}: {e}", self._gen)
 
 
 class CAMPanel(QWidget):
     """Ana CAM paneli — filament sarma yolu + G-code üretici."""
+
+    _WATCHDOG_MS = 30_000   # R2: 30 sn worker zaman aşımı
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -61,6 +101,9 @@ class CAMPanel(QWidget):
         self._gcode_program = None
         self._stl_path: Optional[str] = None
         self._worker_thread: Optional[QThread] = None
+        self._worker_ref: Optional[_Worker] = None
+        self._watchdog: Optional[QTimer] = None
+        self._calc_gen: int = 0                          # nesil sayacı (R2 watchdog)
         self._stack_dict: Optional[dict] = None         # Manuel Dizilim katman yığını
         self._all_layer_paths: Optional[list] = None    # [(layer_dict, WindingPath), ...]
         self._build_ui()
@@ -363,46 +406,146 @@ class CAMPanel(QWidget):
             self._stl_path = path
             self._stl_lbl.setText(os.path.basename(path))
 
+    def _collect_params(self) -> _CalcParams:
+        """R1: TÜM widget değerlerini ANA THREAD'de düz veriye kopyala.
+
+        stack_dict'in derin kopyası geçilir — worker okurken ana thread
+        `set_layer_stack` ile aynı sözlüğü değiştirse bile yarış olmaz.
+        """
+        import copy
+        sd = self._stack_dict
+        stack_copy = copy.deepcopy(sd) if sd else None
+        return _CalcParams(
+            mandrel_type=self._mandrel_type.currentText(),
+            diameter_mm=self._diameter.value(),
+            length_mm=self._length.value(),
+            cone_angle_deg=self._cone_angle.value(),
+            dome_h_mm=self._dome_h.value(),
+            stl_path=self._stl_path,
+            alpha_deg=self._alpha.value(),
+            n_layers=self._n_layers.value(),
+            tow_w_mm=self._tow_w.value(),
+            overlap_pct=self._overlap.value(),
+            strategy_text=self._strategy.currentText(),
+            feed_mm_s=self._feed.value(),
+            rpm=self._rpm.value(),
+            x_min=self._x_min.value(),
+            x_max=self._x_max.value(),
+            stack_dict=stack_copy,
+        )
+
     def _calculate_path(self):
         if self._mandrel_type.currentText() == "STL'den" and not self._stl_path:
             QMessageBox.warning(self, "Uyarı", "Lütfen önce bir STL dosyası seçin.")
             return
+        # R4: Re-entrancy guard — süren bir hesap varsa yeni istek yok say
+        if self._worker_thread is not None and self._worker_thread.isRunning():
+            log.warning("[CAM] hesaplama zaten sürüyor; yeni istek yok sayıldı")
+            return
+
+        # R1: tüm widget okumaları ANA THREAD'de burada toplanır
+        params = self._collect_params()
+        mode = "çok-katman" if params.stack_dict else "parametrik"
+        n_layers = len((params.stack_dict or {}).get("layers", []))
+        log.info("[CAM] Yolu Hesapla: params received "
+                 "(mandrel=%s, mod=%s, %d katman)",
+                 params.mandrel_type, mode, n_layers)
+
+        self._calc_gen += 1
+        gen = self._calc_gen
         self._calc_btn.setEnabled(False)
         self._progress_bar.setVisible(True)
         self._status_lbl.setText("Yol hesaplanıyor…")
 
-        self._worker_thread = QThread()
-        worker = _Worker(self._do_calculate)
-        worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(worker.run)
+        thread = QThread(self)
+        worker = _Worker(self._do_calculate, params, gen)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        # Bound-method bağlantı → QueuedConnection → slot ANA THREAD'de çalışır.
+        # gen sinyalin içinde taşınır (lambda yok → DirectConnection riski yok).
         worker.finished.connect(self._on_path_done)
         worker.error.connect(self._on_path_error)
-        worker.finished.connect(self._worker_thread.quit)
-        worker.error.connect(self._worker_thread.quit)
-        self._worker_thread.start()
-        self._worker_ref = worker  # keep reference
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        # R4: güvenli yaşam döngüsü — thread bitince C++ nesneleri silinir
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_thread_cleanup)
+        self._worker_thread = thread
+        self._worker_ref = worker
 
-    def _do_calculate(self):
+        self._start_watchdog(gen)   # R2: 30 sn watchdog
+        thread.start()
+
+    # ── R2/R4: watchdog + thread yaşam döngüsü yardımcıları ──────────────────
+
+    def _start_watchdog(self, gen: int) -> None:
+        self._stop_watchdog()
+        wd = QTimer(self)
+        wd.setSingleShot(True)
+        wd.timeout.connect(lambda g=gen: self._on_calc_timeout(g))
+        wd.start(self._WATCHDOG_MS)
+        self._watchdog = wd
+
+    def _stop_watchdog(self) -> None:
+        if self._watchdog is not None:
+            self._watchdog.stop()
+            self._watchdog.deleteLater()
+            self._watchdog = None
+
+    def _on_thread_cleanup(self) -> None:
+        """R4: thread sonlandı — Python referansları bırakılır
+        (C++ nesneleri deleteLater ile temizlenir)."""
+        self._worker_thread = None
+        self._worker_ref = None
+
+    def _on_calc_timeout(self, gen: int) -> None:
+        """R2: worker 30 sn içinde bitmedi — UI serbest, sonuç geçersiz sayılır."""
+        if gen != self._calc_gen:
+            return
+        if self._worker_thread is None or not self._worker_thread.isRunning():
+            return
+        log.error("[CAM] hesaplama zaman aşımı (%d s) — gen %d iptal",
+                  self._WATCHDOG_MS // 1000, gen)
+        self._calc_gen += 1   # geç gelen finished/error yok sayılsın
+        self._calc_btn.setEnabled(True)
+        self._progress_bar.setVisible(False)
+        self._status_lbl.setText(
+            f"Zaman aşımı: hesaplama {self._WATCHDOG_MS // 1000} sn içinde "
+            f"tamamlanmadı, iptal edildi."
+        )
+        try:
+            self._worker_thread.quit()
+        except Exception:
+            log.exception("[CAM] watchdog quit hatası")
+
+    def _do_calculate(self, req: _CalcParams):
+        """R1: yalnızca düz `req` okunur — hiçbir Qt widget erişimi yok."""
         MandrelProfile, WindingPathParams, generate_path, plan_motion, MachineConfig, generate_gcode = _make_backend()
         import math as _math
 
-        mtype = self._mandrel_type.currentText()
-        r_mm = self._diameter.value() / 2.0
-        l_mm = self._length.value()
+        log.info("[CAM] params received: mandrel=%s D=%.1f L=%.1f alpha=%.1f "
+                 "n=%d tow=%.1f overlap=%.1f strat=%s stack=%d",
+                 req.mandrel_type, req.diameter_mm, req.length_mm, req.alpha_deg,
+                 req.n_layers, req.tow_w_mm, req.overlap_pct, req.strategy_text,
+                 len((req.stack_dict or {}).get("layers", [])))
+
+        r_mm = req.diameter_mm / 2.0
+        l_mm = req.length_mm
+        mtype = req.mandrel_type
 
         if mtype == "Silindir":
             profile = MandrelProfile.cylinder(l_mm, r_mm)
         elif mtype == "Konik":
-            cone_deg = self._cone_angle.value()
-            r_end = r_mm + l_mm * _math.tan(_math.radians(cone_deg))
+            r_end = r_mm + l_mm * _math.tan(_math.radians(req.cone_angle_deg))
             profile = MandrelProfile.cone(l_mm, r_mm, r_end)
         elif mtype == "Kubbeli Silindir":
-            profile = MandrelProfile.dome_cylinder_dome(l_mm, r_mm, self._dome_h.value())
+            profile = MandrelProfile.dome_cylinder_dome(l_mm, r_mm, req.dome_h_mm)
         else:
-            profile = MandrelProfile.from_stl(self._stl_path)
+            profile = MandrelProfile.from_stl(req.stl_path)
 
         # ── Çok katmanlı mod (Manuel Dizilim'den yığın geldi) ────────────────
-        stack = self._stack_dict
+        stack = req.stack_dict
         if stack and stack.get("layers"):
             all_layer_paths = []
             for layer in stack["layers"]:
@@ -417,42 +560,50 @@ class CAMPanel(QWidget):
                     profile=profile,
                     alpha_deg=float(layer.get("alpha_deg", 55.0)),
                     n_layers=1,
-                    tow_width_mm=float(layer.get("fitil_genisligi_mm",
-                                                  self._tow_w.value())),
-                    overlap_pct=float(layer.get("cakisma_pct",
-                                                self._overlap.value())),
-                    feed_mm_s=float(layer.get("feed_mm_s", self._feed.value())),
-                    spindle_rpm=float(layer.get("spindle_rpm", self._rpm.value())),
+                    tow_width_mm=float(layer.get("fitil_genisligi_mm", req.tow_w_mm)),
+                    overlap_pct=float(layer.get("cakisma_pct", req.overlap_pct)),
+                    feed_mm_s=float(layer.get("feed_mm_s", req.feed_mm_s)),
+                    spindle_rpm=float(layer.get("spindle_rpm", req.rpm)),
                     winding_strategy=strategy,
-                    carriage_min_mm=self._x_min.value(),
-                    carriage_max_mm=self._x_max.value(),
+                    carriage_min_mm=req.x_min,
+                    carriage_max_mm=req.x_max,
                 )
                 p = generate_path(pp)
                 all_layer_paths.append((layer, p))
             first_path = all_layer_paths[0][1] if all_layer_paths else None
             if first_path is None:
                 raise RuntimeError("Katman yığınından yol üretilemedi.")
+            log.info("[CAM] path generated (çok-katman): %d katman, ilk yol %d nokta",
+                     len(all_layer_paths), len(first_path.points))
             return first_path, profile, all_layer_paths
 
         # ── Tek-açı parametrik mod ───────────────────────────────────────────
         strategy_map = {"Sarmal": "helical", "Çevre": "hoop", "Kutupsal": "polar"}
-        strategy = strategy_map.get(self._strategy.currentText(), "helical")
+        strategy = strategy_map.get(req.strategy_text, "helical")
         path_params = WindingPathParams(
             profile=profile,
-            alpha_deg=self._alpha.value(),
-            n_layers=self._n_layers.value(),
-            tow_width_mm=self._tow_w.value(),
-            overlap_pct=self._overlap.value(),
-            feed_mm_s=self._feed.value(),
-            spindle_rpm=self._rpm.value(),
+            alpha_deg=req.alpha_deg,
+            n_layers=req.n_layers,
+            tow_width_mm=req.tow_w_mm,
+            overlap_pct=req.overlap_pct,
+            feed_mm_s=req.feed_mm_s,
+            spindle_rpm=req.rpm,
             winding_strategy=strategy,
-            carriage_min_mm=self._x_min.value(),
-            carriage_max_mm=self._x_max.value(),
+            carriage_min_mm=req.x_min,
+            carriage_max_mm=req.x_max,
         )
         path = generate_path(path_params)
+        log.info("[CAM] path generated (parametrik): %d nokta, %d devre",
+                 len(path.points), path.n_circuits)
         return path, profile, None
 
-    def _on_path_done(self, path, profile, all_layer_paths):
+    def _on_path_done(self, path, profile, all_layer_paths, gen):
+        # R2: watchdog iptaliyle geçersizleşen geç sonucu yok say
+        if gen != self._calc_gen:
+            log.info("[CAM] geç gelen sonuç yok sayıldı (gen %s != %s)",
+                     gen, self._calc_gen)
+            return
+        self._stop_watchdog()
         self._winding_path = path
         self._all_layer_paths = all_layer_paths
         self._calc_btn.setEnabled(True)
@@ -466,16 +617,21 @@ class CAMPanel(QWidget):
             f"Yol hesaplandı: {n_layers_info}{n} nokta, "
             f"{path.n_circuits} devre, {path.coverage_pct:.1f}% kapsama"
         )
-        # 3D önizlemeyi güncelle
+        # 3D önizlemeyi güncelle (R7: hata artık yutulmaz, loglanır)
         try:
             self._viewer.set_cam_path(profile, path)
+            log.info("[CAM] 3d updated (%d nokta)", n)
         except Exception:
-            pass
+            log.exception("[CAM] 3D güncelleme hatası")
 
-    def _on_path_error(self, msg: str):
+    def _on_path_error(self, msg: str, gen):
+        if gen != self._calc_gen:
+            return
+        self._stop_watchdog()
         self._calc_btn.setEnabled(True)
         self._progress_bar.setVisible(False)
         self._status_lbl.setText(f"Hata: {msg}")
+        log.error("[CAM] path error: %s", msg)
         QMessageBox.critical(self, "Yol Hesaplama Hatası", msg)
 
     def _generate_gcode(self):
@@ -483,6 +639,8 @@ class CAMPanel(QWidget):
             QMessageBox.information(self, "Bilgi",
                 "Önce 'Geometri & Parametreler' sekmesinde yolu hesaplayın.")
             return
+        mode = "çok-katman" if self._all_layer_paths else "parametrik"
+        log.info("[CAM] G-code Üret: başladı (mod=%s)", mode)
         try:
             _, _, _, plan_motion, MachineConfig, generate_gcode = _make_backend()
             ctrl_map = {"özel": "custom"}
@@ -560,7 +718,10 @@ class CAMPanel(QWidget):
             secs = int(gp.estimated_time_s % 60)
             self._stat_time.setText(f"{mins}d {secs}s")
             self._stat_lines.setText(str(len(gp.lines)))
+            log.info("[CAM] gcode generated (%d satır, %d devre)",
+                     len(gp.lines), gp.n_circuits)
         except Exception as e:
+            log.exception("[CAM] gcode üretim hatası")
             QMessageBox.critical(self, "G-code Hatası", str(e))
 
     def _copy_to_clipboard(self):
@@ -591,12 +752,19 @@ class CAMPanel(QWidget):
         Manuel Dizilim'den katman yığını al.
         stack: dict (versiyon, layers) veya to_dict() metoduna sahip LayerStack.
         """
+        # R8: stack_dict'in NEREDEN geldiğini ve neden boşaldığını izle
         if isinstance(stack, dict):
             self._stack_dict = stack
+            log.info("[CAM] set_layer_stack: dict alındı (%d katman)",
+                     len(stack.get("layers", [])))
         elif hasattr(stack, "to_dict"):
             self._stack_dict = stack.to_dict()
+            log.info("[CAM] set_layer_stack: LayerStack nesnesi alındı (%d katman)",
+                     len((self._stack_dict or {}).get("layers", [])))
         else:
             self._stack_dict = {}
+            log.warning("[CAM] set_layer_stack: beklenmeyen tip %s — boş yığın varsayıldı",
+                        type(stack).__name__)
 
         n = len((self._stack_dict or {}).get("layers", []))
         if n > 0:
@@ -610,7 +778,12 @@ class CAMPanel(QWidget):
             )
             self._alpha.setEnabled(False)
             self._n_layers.setEnabled(False)
+            log.info("[CAM] set_layer_stack: çok-katmanlı mod aktif (%d katman)", n)
         else:
+            # R8: BURASI stack_dict'in None'a düştüğü tek nokta —
+            # gelen yığının layers'ı boş ya da tip uyumsuz → parametrik moda dönülür
+            log.info("[CAM] set_layer_stack: layers boş → parametrik moda "
+                     "dönüldü (stack_dict None'a çekildi)")
             self._stack_dict = None
             self._stack_info_lbl.setText(
                 "Parametrik mod  (Manuel Dizilim'den yığın bekleniyor)"
