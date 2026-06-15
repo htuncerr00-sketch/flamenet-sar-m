@@ -118,11 +118,14 @@ class FilamentWindingApp(QMainWindow):
             parent=self,
         )
         self._panel_proje.set_autosave_manager(self._autosave_mgr)
-        # Her kirlilik/komut sinyali debounce sayacını besler
-        self._panel_proje.degisiklikDurumu.connect(
-            lambda dirty: dirty and self._autosave_mgr.notify_change())
-        self._undo_stack.indexChanged.connect(
-            lambda *_: self._autosave_mgr.notify_change())
+        # Kirlilik/komut sinyalleri debounce sayacını besler.
+        # Headless (test/CI) modunda bağlantı kurulmaz — timer hiç
+        # başlamaz ve 60 s soak testinde CPU spike oluşmaz.
+        if not headless:
+            self._panel_proje.degisiklikDurumu.connect(
+                lambda dirty: dirty and self._autosave_mgr.notify_change())
+            self._undo_stack.indexChanged.connect(
+                lambda *_: self._autosave_mgr.notify_change())
         # Çökme tespiti + oturum kilidi yalnızca etkileşimli modda —
         # headless (test/CI) oturumları kullanıcı kilidine dokunmaz
         if not headless:
