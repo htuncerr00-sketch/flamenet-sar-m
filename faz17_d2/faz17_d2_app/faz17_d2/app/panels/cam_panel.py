@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import sys
 import logging
-from dataclasses import dataclass
 from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QObject
@@ -25,64 +24,24 @@ from PySide6.QtWidgets import (
 
 from .winding_3d import Winding3DPanel
 from ..themes.dark_industrial import COLOR
+from ..cam_engine import CamRequest
+import app.cam_engine as _eng
 
 log = logging.getLogger("faz17_d2.cam_panel")
 
 
-@dataclass
-class _CalcParams:
-    """Worker'a geçen DÜZ parametreler — hiçbir Qt nesnesi içermez (R1).
-
-    Tüm widget okumaları ANA THREAD'de `_collect_params()` ile bu yapıya
-    kopyalanır; worker thread yalnızca bu düz veriyi görür.
-    """
-    mandrel_type: str
-    diameter_mm: float
-    length_mm: float
-    cone_angle_deg: float
-    dome_h_mm: float
-    stl_path: Optional[str]
-    alpha_deg: float
-    n_layers: int
-    tow_w_mm: float
-    overlap_pct: float
-    strategy_text: str
-    feed_mm_s: float
-    rpm: float
-    x_min: float
-    x_max: float
-    stack_dict: Optional[dict]
-
-
-def _make_backend():
-    """Backend CAM modüllerini içe aktar."""
-    from backend.core.geometry_engine import MandrelProfile
-    from backend.core.path_generator import WindingPathParams, generate_path
-    from backend.core.motion_planner import plan_motion
-    from backend.core.gcode_postprocessor import MachineConfig, generate_gcode
-    return MandrelProfile, WindingPathParams, generate_path, plan_motion, MachineConfig, generate_gcode
-
-
-def _import_preflight():
-    """R3: Preflight fonksiyonlarını içe aktar (ayrı tutulur — test izolasyonu için)."""
-    from backend.core.path_generator import (
-        preflight_check, preflight_check_stack, ComplexityError,
-    )
-    return preflight_check, preflight_check_stack, ComplexityError
-
-
 class _Worker(QObject):
-    """Arka planda yol hesaplaması (R1: yalnızca düz _CalcParams alır).
+    """Arka planda yol hesaplaması (R1: yalnızca düz CamRequest alır).
 
     `gen` (nesil), sinyalin İÇİNDE taşınır — böylece slot'lar bound-method
     olarak doğrudan bağlanabilir (QueuedConnection → ANA THREAD'de çalışır).
     Lambda sarmalayıcı KULLANILMAZ: lambda'nın QObject afinitesi olmadığından
     Qt DirectConnection'a düşer ve slot worker thread'de çalışırdı (R1 ihlali).
     """
-    finished = Signal(object, object, object, int)  # (path, profile, all_layer_paths, gen)
+    finished = Signal(object, object, object, int)  # (path, model, all_layer_paths, gen)
     error = Signal(str, int)                         # (msg, gen)
 
-    def __init__(self, fn, params: "_CalcParams", gen: int):
+    def __init__(self, fn, params: CamRequest, gen: int):
         super().__init__()
         self._fn = fn
         self._params = params
@@ -106,6 +65,7 @@ class CAMPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._winding_path = None
+        self._mandrel_model = None                       # S2: MandrelModel (güven + profil)
         self._gcode_program = None
         self._stl_path: Optional[str] = None
         self._worker_thread: Optional[QThread] = None
@@ -414,8 +374,8 @@ class CAMPanel(QWidget):
             self._stl_path = path
             self._stl_lbl.setText(os.path.basename(path))
 
-    def _collect_params(self) -> _CalcParams:
-        """R1: TÜM widget değerlerini ANA THREAD'de düz veriye kopyala.
+    def _collect_params(self) -> CamRequest:
+        """R1: TÜM widget değerlerini ANA THREAD'de CamRequest'e kopyala.
 
         stack_dict'in derin kopyası geçilir — worker okurken ana thread
         `set_layer_stack` ile aynı sözlüğü değiştirse bile yarış olmaz.
@@ -423,7 +383,7 @@ class CAMPanel(QWidget):
         import copy
         sd = self._stack_dict
         stack_copy = copy.deepcopy(sd) if sd else None
-        return _CalcParams(
+        return CamRequest(
             mandrel_type=self._mandrel_type.currentText(),
             diameter_mm=self._diameter.value(),
             length_mm=self._length.value(),
@@ -434,7 +394,7 @@ class CAMPanel(QWidget):
             n_layers=self._n_layers.value(),
             tow_w_mm=self._tow_w.value(),
             overlap_pct=self._overlap.value(),
-            strategy_text=self._strategy.currentText(),
+            strategy=self._strategy.currentText(),
             feed_mm_s=self._feed.value(),
             rpm=self._rpm.value(),
             x_min=self._x_min.value(),
@@ -527,130 +487,23 @@ class CAMPanel(QWidget):
         except Exception:
             log.exception("[CAM] watchdog quit hatası")
 
-    def _do_calculate(self, req: _CalcParams):
-        """R1: yalnızca düz `req` okunur — hiçbir Qt widget erişimi yok."""
-        MandrelProfile, WindingPathParams, generate_path, plan_motion, MachineConfig, generate_gcode = _make_backend()
-        preflight_check, preflight_check_stack, ComplexityError = _import_preflight()
-        import math as _math
+    def _do_calculate(self, req: CamRequest):
+        """R1: yalnızca düz CamRequest okunur — hiçbir Qt widget erişimi yok.
 
-        log.info("[CAM] params received: mandrel=%s D=%.1f L=%.1f alpha=%.1f "
-                 "n=%d tow=%.1f overlap=%.1f strat=%s stack=%d",
+        cam_engine facade'ı üzerinden çalışır; tüm backend importları orada.
+        Dönüş: (path, model, all_layer_paths)  [model = MandrelModel]
+        """
+        log.info("[CAM] hesaplama başlıyor: mandrel=%s D=%.1f L=%.1f alpha=%.1f "
+                 "n=%d strat=%s stack=%d",
                  req.mandrel_type, req.diameter_mm, req.length_mm, req.alpha_deg,
-                 req.n_layers, req.tow_w_mm, req.overlap_pct, req.strategy_text,
+                 req.n_layers, req.strategy,
                  len((req.stack_dict or {}).get("layers", [])))
 
-        r_mm = req.diameter_mm / 2.0
-        l_mm = req.length_mm
-        mtype = req.mandrel_type
+        model = _eng.load_mandrel(req)
+        path, all_layer_paths = _eng.compute_path(req, model)
+        return path, model, all_layer_paths
 
-        if mtype == "Silindir":
-            profile = MandrelProfile.cylinder(l_mm, r_mm)
-        elif mtype == "Konik":
-            r_end = r_mm + l_mm * _math.tan(_math.radians(req.cone_angle_deg))
-            profile = MandrelProfile.cone(l_mm, r_mm, r_end)
-        elif mtype == "Kubbeli Silindir":
-            profile = MandrelProfile.dome_cylinder_dome(l_mm, r_mm, req.dome_h_mm)
-        else:
-            profile = MandrelProfile.from_stl(req.stl_path)
-
-        # ── R3: Preflight kompleksite denetimi ───────────────────────────────────
-        _stack_pre = req.stack_dict
-        if _stack_pre and _stack_pre.get("layers"):
-            # Çok-katmanlı: her katman K1+K2a, ardından toplam K2b
-            _layer_params = []
-            for _layer in _stack_pre["layers"]:
-                _ltype  = _layer.get("layer_type") or _layer.get("type", "helical")
-                _alpha  = float(_layer.get("alpha_deg", req.alpha_deg))
-                if _ltype == "hoop":
-                    _alpha = 88.0
-                elif _ltype == "polar":
-                    _alpha = min(max(_alpha, 5.0), 20.0)
-                _layer_params.append(WindingPathParams(
-                    profile      = profile,
-                    alpha_deg    = _alpha,
-                    n_layers     = 1,
-                    tow_width_mm = float(_layer.get("fitil_genisligi_mm", req.tow_w_mm)),
-                    overlap_pct  = float(_layer.get("cakisma_pct", req.overlap_pct)),
-                ))
-            _ests = preflight_check_stack(_layer_params)   # ComplexityError fırlatabilir
-            log.info("[CAM] preflight OK (stack %d katman): %d toplam nokta",
-                     len(_ests), sum(e.points_per_layer for e in _ests))
-        else:
-            # Parametrik: strateji → gerçek alpha, tek preflight çağrısı
-            _salpha = req.alpha_deg
-            if req.strategy_text == "Çevre":
-                _salpha = 88.0
-            elif req.strategy_text == "Kutupsal":
-                _salpha = min(max(req.alpha_deg, 5.0), 20.0)
-            _pp_pre = WindingPathParams(
-                profile      = profile,
-                alpha_deg    = _salpha,
-                n_layers     = req.n_layers,
-                tow_width_mm = req.tow_w_mm,
-                overlap_pct  = req.overlap_pct,
-            )
-            _est = preflight_check(_pp_pre)   # ComplexityError fırlatabilir
-            log.info("[CAM] preflight OK: %d devre/kat, %d nokta/kat, "
-                     "%d toplam, %.1f MB, ~%.0f sn",
-                     _est.n_circuits_per_layer, _est.points_per_layer,
-                     _est.total_points, _est.estimated_memory_mb,
-                     _est.estimated_runtime_s)
-        # ── /R3 Preflight ─────────────────────────────────────────────────────────
-
-        # ── Çok katmanlı mod (Manuel Dizilim'den yığın geldi) ────────────────
-        stack = req.stack_dict
-        if stack and stack.get("layers"):
-            all_layer_paths = []
-            for layer in stack["layers"]:
-                ltype = layer.get("layer_type") or layer.get("type", "helical")
-                if ltype == "hoop":
-                    strategy = "hoop"
-                elif ltype == "polar":
-                    strategy = "polar"
-                else:
-                    strategy = "helical"
-                pp = WindingPathParams(
-                    profile=profile,
-                    alpha_deg=float(layer.get("alpha_deg", 55.0)),
-                    n_layers=1,
-                    tow_width_mm=float(layer.get("fitil_genisligi_mm", req.tow_w_mm)),
-                    overlap_pct=float(layer.get("cakisma_pct", req.overlap_pct)),
-                    feed_mm_s=float(layer.get("feed_mm_s", req.feed_mm_s)),
-                    spindle_rpm=float(layer.get("spindle_rpm", req.rpm)),
-                    winding_strategy=strategy,
-                    carriage_min_mm=req.x_min,
-                    carriage_max_mm=req.x_max,
-                )
-                p = generate_path(pp)
-                all_layer_paths.append((layer, p))
-            first_path = all_layer_paths[0][1] if all_layer_paths else None
-            if first_path is None:
-                raise RuntimeError("Katman yığınından yol üretilemedi.")
-            log.info("[CAM] path generated (çok-katman): %d katman, ilk yol %d nokta",
-                     len(all_layer_paths), len(first_path.points))
-            return first_path, profile, all_layer_paths
-
-        # ── Tek-açı parametrik mod ───────────────────────────────────────────
-        strategy_map = {"Sarmal": "helical", "Çevre": "hoop", "Kutupsal": "polar"}
-        strategy = strategy_map.get(req.strategy_text, "helical")
-        path_params = WindingPathParams(
-            profile=profile,
-            alpha_deg=req.alpha_deg,
-            n_layers=req.n_layers,
-            tow_width_mm=req.tow_w_mm,
-            overlap_pct=req.overlap_pct,
-            feed_mm_s=req.feed_mm_s,
-            spindle_rpm=req.rpm,
-            winding_strategy=strategy,
-            carriage_min_mm=req.x_min,
-            carriage_max_mm=req.x_max,
-        )
-        path = generate_path(path_params)
-        log.info("[CAM] path generated (parametrik): %d nokta, %d devre",
-                 len(path.points), path.n_circuits)
-        return path, profile, None
-
-    def _on_path_done(self, path, profile, all_layer_paths, gen):
+    def _on_path_done(self, path, model, all_layer_paths, gen):
         # R2: watchdog iptaliyle geçersizleşen geç sonucu yok say
         if gen != self._calc_gen:
             log.info("[CAM] geç gelen sonuç yok sayıldı (gen %s != %s)",
@@ -658,6 +511,7 @@ class CAMPanel(QWidget):
             return
         self._stop_watchdog()
         self._winding_path = path
+        self._mandrel_model = model                      # S2: MandrelModel sakla
         self._all_layer_paths = all_layer_paths
         self._calc_btn.setEnabled(True)
         self._progress_bar.setVisible(False)
@@ -666,13 +520,19 @@ class CAMPanel(QWidget):
             f"{len(all_layer_paths)} katman, "
             if all_layer_paths else ""
         )
+        # Güven bilgisini durum çubuğuna yansıt
+        conf_info = ""
+        if model is not None and model.confidence is not None:
+            conf_info = f" | Güven: {model.confidence.grade}"
         self._status_lbl.setText(
             f"Yol hesaplandı: {n_layers_info}{n} nokta, "
-            f"{path.n_circuits} devre, {path.coverage_pct:.1f}% kapsama"
+            f"{path.n_circuits} devre, {path.coverage_pct:.1f}% kapsama{conf_info}"
         )
         # 3D önizlemeyi güncelle (R7: hata artık yutulmaz, loglanır)
         try:
-            self._viewer.set_cam_path(profile, path)
+            profile = model.as_profile() if model is not None else None
+            if profile is not None:
+                self._viewer.set_cam_path(profile, path)
             log.info("[CAM] 3d updated (%d nokta)", n)
         except Exception:
             log.exception("[CAM] 3D güncelleme hatası")
@@ -695,7 +555,7 @@ class CAMPanel(QWidget):
         mode = "çok-katman" if self._all_layer_paths else "parametrik"
         log.info("[CAM] G-code Üret: başladı (mod=%s)", mode)
         try:
-            _, _, _, plan_motion, MachineConfig, generate_gcode = _make_backend()
+            from backend.core.gcode_postprocessor import MachineConfig
             ctrl_map = {"özel": "custom"}
             ctrl = ctrl_map.get(self._ctrl_type.currentText(),
                                 self._ctrl_type.currentText())
@@ -706,60 +566,8 @@ class CAMPanel(QWidget):
                 controller_type=ctrl,
             )
 
-            if self._all_layer_paths:
-                # Çok katmanlı mod: her katman için ayrı G-code bloğu, sıralı birleştir
-                all_lines: list = []
-                total_len = 0.0
-                total_time = 0.0
-                total_circuits = 0
-                coverage = 0.0
-
-                for i, (layer_dict, wpath) in enumerate(self._all_layer_paths):
-                    ltype = layer_dict.get("layer_type") or layer_dict.get("type", "?")
-                    alpha = layer_dict.get("alpha_deg", 0.0)
-                    lbl = layer_dict.get("label", f"Katman {i + 1}")
-                    all_lines.append(f"; === Katman {i + 1}: {lbl} ({ltype} α={alpha:+.1f}°) ===")
-                    segs = plan_motion(wpath)
-                    gp_layer = generate_gcode(segs, wpath, cfg)
-                    # Skip header/footer lines for middle layers
-                    body = [ln for ln in gp_layer.lines
-                            if not ln.startswith("G21") and not ln.startswith("G90")
-                            and not ln.startswith("G28") and ln != "M30"
-                            and not ln.startswith("; Filament")
-                            and not ln.startswith("; Mandrel")
-                            and not ln.startswith("; Sarma")
-                            and not ln.startswith("; Toplam")
-                            and not ln.startswith("; Tahmini")]
-                    if i == 0:
-                        # Keep full header for first layer
-                        all_lines.extend(gp_layer.lines[:6])  # preamble
-                        body = gp_layer.lines[6:]
-                        body = [ln for ln in body if ln != "M30"]
-                    all_lines.extend(body)
-                    total_len += gp_layer.total_length_mm
-                    total_time += gp_layer.estimated_time_s
-                    total_circuits += gp_layer.n_circuits
-                    coverage = max(coverage, gp_layer.coverage_pct)
-
-                all_lines.append("M30  ; Program sonu")
-
-                # Build a combined GCodeProgram-like object
-                class _Combined:
-                    lines = all_lines
-                    n_circuits = total_circuits
-                    coverage_pct = coverage
-                    total_length_mm = total_len
-                    estimated_time_s = total_time
-
-                    def as_text(self):
-                        return "\n".join(self.lines)
-
-                gp = _Combined()
-
-            else:
-                # Tek-açı modu
-                segments = plan_motion(self._winding_path)
-                gp = generate_gcode(segments, self._winding_path, cfg)
+            gp = _eng.compute_gcode(
+                self._winding_path, cfg, self._all_layer_paths)
 
             self._gcode_program = gp
             self._gcode_edit.setPlainText(gp.as_text())
