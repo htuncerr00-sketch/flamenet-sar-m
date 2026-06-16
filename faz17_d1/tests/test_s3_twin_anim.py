@@ -118,8 +118,8 @@ def t4_apply_frame():
     gl = panel._gl
     check(gl._eye_item is not None, "T4 payout gözü 3D item oluştu")
     check(gl._delivery_item is not None, "T4 teslim fiberi 3D item oluştu")
-    check(gl._anim_fiber_item is not None, "T4 büyüyen fiber şeridi oluştu")
-    print("  T4 apply_frame: göz + teslim fiberi + şerit sahneye eklendi ✓")
+    check(gl._ribbon_item is not None, "T4 büyüyen tow ribbon (mesh) oluştu")
+    print("  T4 apply_frame: göz + teslim fiberi + ribbon sahneye eklendi ✓")
 
 
 # ── T5: Mandrel x∈[0,L] sınırları — temas noktaları aralık içinde ────────────
@@ -155,12 +155,89 @@ def t6_none_twin():
     print("  T6 none twin: animasyon nazikçe devre dışı ✓")
 
 
+# ── T7: S4 ribbon kenarları — fiziksel genişlik ──────────────────────────────
+
+def t7_ribbon_edges():
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(sys.argv)
+    from app.panels.entegre_tasarim_paneli import EntegreTasarimPaneli
+
+    twin, profile = _make_twin()
+    panel = EntegreTasarimPaneli()
+    panel._anim_tow_w_mm = 8.0
+    panel._setup_animation(twin, profile)
+
+    check(panel._anim_rib_L is not None, "T7 ribbon sol kenar kuruldu")
+    check(panel._anim_rib_R is not None, "T7 ribbon sağ kenar kuruldu")
+    n = len(panel._anim_xyz)
+    check(panel._anim_rib_L.shape == (n, 3), "T7 sol kenar (N,3)")
+    check(panel._anim_rib_R.shape == (n, 3), "T7 sağ kenar (N,3)")
+
+    # Bant genişliği fiziksel: |L-R| ≈ tow_w (metre), birkaç orta noktada
+    L = panel._anim_rib_L.astype(np.float64)
+    R = panel._anim_rib_R.astype(np.float64)
+    widths = np.linalg.norm(L - R, axis=1)   # metre
+    mid = widths[n // 4: 3 * n // 4]
+    expected_m = 8.0 / 1000.0
+    err = np.abs(np.median(mid) - expected_m) / expected_m
+    check(err < 0.05, f"T7 bant genişliği ≈8mm (medyan={np.median(mid)*1000:.2f}mm)")
+    print(f"  T7 ribbon edges: genişlik medyan={np.median(mid)*1000:.2f}mm "
+          f"(hedef 8.00mm), hata=%{err*100:.1f}")
+
+
+# ── T8: S4 ribbon mesh sahneye eklendi (GLMeshItem) ──────────────────────────
+
+def t8_ribbon_mesh():
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(sys.argv)
+    from app.panels.entegre_tasarim_paneli import EntegreTasarimPaneli
+
+    twin, profile = _make_twin()
+    panel = EntegreTasarimPaneli()
+    panel._setup_animation(twin, profile)
+    n = len(panel._anim_xyz)
+    panel._apply_anim_frame(n // 2)
+
+    gl = panel._gl
+    check(gl._ribbon_item is not None, "T8 tow ribbon mesh oluştu")
+    # İnce çizgi artık birincil değil (ribbon devraldı)
+    check(gl._anim_fiber_item is None, "T8 ince çizgi kullanılmıyor (ribbon devrede)")
+    print("  T8 ribbon mesh: GLMeshItem sahnede, ince çizgi devre dışı ✓")
+
+
+# ── T9: Ribbon genişlik yönü merkez çizgisine dik ─────────────────────────────
+
+def t9_ribbon_perpendicular():
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(sys.argv)
+    from app.panels.entegre_tasarim_paneli import EntegreTasarimPaneli
+
+    twin, profile = _make_twin()
+    panel = EntegreTasarimPaneli()
+    panel._setup_animation(twin, profile)
+
+    P = panel._anim_xyz.astype(np.float64)
+    L = panel._anim_rib_L.astype(np.float64)
+    R = panel._anim_rib_R.astype(np.float64)
+    n = len(P)
+    # Genişlik vektörü w = L-R; merkez tanjantı t = P[i+1]-P[i]; w·t ≈ 0
+    i = n // 2
+    w = L[i] - R[i]
+    t = P[i + 1] - P[i]
+    w /= (np.linalg.norm(w) + 1e-12)
+    t /= (np.linalg.norm(t) + 1e-12)
+    dot = abs(float(np.dot(w, t)))
+    check(dot < 0.15, f"T9 genişlik yönü tanjanta ~dik (|w·t|={dot:.3f})")
+    print(f"  T9 ribbon perpendicular: |w·t|={dot:.3f} (≈0 ⇒ dik) ✓")
+
+
 def main():
     print("=" * 70)
-    print("S3 — TwinState animasyon entegrasyonu doğrulama")
+    print("S3+S4 — TwinState animasyon + tow ribbon doğrulama")
     print("=" * 70)
     for fn in [t1_twinstate_fields, t2_layer_growth, t3_setup_animation,
-               t4_apply_frame, t5_contact_bounds, t6_none_twin]:
+               t4_apply_frame, t5_contact_bounds, t6_none_twin,
+               t7_ribbon_edges, t8_ribbon_mesh, t9_ribbon_perpendicular]:
         try:
             fn()
         except Exception as exc:

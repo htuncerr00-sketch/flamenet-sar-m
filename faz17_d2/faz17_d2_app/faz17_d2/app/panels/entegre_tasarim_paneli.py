@@ -428,7 +428,8 @@ class _MachineGLView(gl.GLViewWidget):
         self._frame_items:     list = []   # statik: raylar, headstock, tailstock, zemin
         self._carriage_items:  list = []   # dinamik: X boyunca hareket eder
         self._fiber_items:     list = []   # hesap sonrası statik fiber yolları
-        self._anim_fiber_item       = None  # simülasyonda büyüyen GLLinePlotItem
+        self._anim_fiber_item       = None  # (S4 öncesi) ince çizgi — artık kullanılmıyor
+        self._ribbon_item           = None  # S4: fiziksel genişlikli tow ribbon (GLMeshItem)
         self._eye_item              = None  # S3: payout gözü işaretçisi (scatter)
         self._delivery_item         = None  # S3: gözden temas noktasına teslim fiberi
         self._anim_mandrel_angle: float = 0.0
@@ -509,15 +510,12 @@ class _MachineGLView(gl.GLViewWidget):
         self._mandrel_items.clear()
         self._frame_items.clear()
         self._carriage_items.clear()
-        if self._anim_fiber_item is not None:
-            self.removeItem(self._anim_fiber_item)
-            self._anim_fiber_item = None
-        if self._eye_item is not None:
-            self.removeItem(self._eye_item)
-            self._eye_item = None
-        if self._delivery_item is not None:
-            self.removeItem(self._delivery_item)
-            self._delivery_item = None
+        for attr in ('_anim_fiber_item', '_ribbon_item', '_eye_item',
+                     '_delivery_item'):
+            item = getattr(self, attr, None)
+            if item is not None:
+                self.removeItem(item)
+                setattr(self, attr, None)
         self._anim_mandrel_angle = 0.0
         self._carriage_x_m = L / 2.0
 
@@ -562,7 +560,8 @@ class _MachineGLView(gl.GLViewWidget):
 
     def set_simulation_state(self, a_deg: float, x_mm: float,
                               pts_3d, *, eye_xyz=None,
-                              surface_r_mm: Optional[float] = None) -> None:
+                              surface_r_mm: Optional[float] = None,
+                              ribbon_left=None, ribbon_right=None) -> None:
         """4-eksen + payout TwinState güncellemesi.
 
         Parametreler
@@ -572,6 +571,8 @@ class _MachineGLView(gl.GLViewWidget):
         pts_3d       : Büyüyen temas noktası şeridi — dünya koordinatları (N,3)
         eye_xyz      : Payout gözünün dünya konumu (3,)  [S3]
         surface_r_mm : O anki yüzey yarıçapı (katman büyümesi)  [S3/S6 köprüsü]
+        ribbon_left  : Tow ribbon sol kenar dünya koordinatları (N,3)  [S4]
+        ribbon_right : Tow ribbon sağ kenar dünya koordinatları (N,3)  [S4]
         """
         # 1. Mandrel dönüşü (X ekseni etrafında kümülatif)
         delta = a_deg - self._anim_mandrel_angle
@@ -589,8 +590,12 @@ class _MachineGLView(gl.GLViewWidget):
                 item.translate(dx, 0, 0)
             self._carriage_x_m = x_m
 
-        # 3. İlerleyen fiber (yatırılan şerit)
-        if pts_3d is not None and len(pts_3d) >= 2:
+        # 3. S4: Yatırılan fiber — fiziksel genişlikli tow ribbon (mesh strip)
+        if ribbon_left is not None and ribbon_right is not None \
+                and len(ribbon_left) >= 2:
+            self._update_ribbon(ribbon_left, ribbon_right)
+        elif pts_3d is not None and len(pts_3d) >= 2:
+            # Ribbon verisi yoksa ince çizgiye düş (geri uyum)
             if self._anim_fiber_item is None:
                 self._anim_fiber_item = gl.GLLinePlotItem(
                     pos=pts_3d, color=(1.0, 1.0, 0.15, 0.95),
@@ -626,9 +631,47 @@ class _MachineGLView(gl.GLViewWidget):
                 else:
                     self._delivery_item.setData(pos=seg)
 
+    def _update_ribbon(self, left, right) -> None:
+        """S4: Tow ribbon'u mesh strip olarak kur/güncelle.
+
+        left/right: (m,3) dünya koordinatları (metre) — bant kenarları.
+        Köşeler [L0,R0,L1,R1,…] sırasıyla örülür; her quad iki üçgene bölünür.
+        """
+        L = np.asarray(left, dtype=np.float32)
+        R = np.asarray(right, dtype=np.float32)
+        m = min(len(L), len(R))
+        if m < 2:
+            return
+        L = L[:m]; R = R[:m]
+
+        # Köşeler: 2m adet, [L0,R0,L1,R1,…]
+        verts = np.empty((2 * m, 3), dtype=np.float32)
+        verts[0::2] = L
+        verts[1::2] = R
+
+        # Yüzler: her ardışık çift için 2 üçgen
+        i = np.arange(m - 1, dtype=np.int32)
+        base = (2 * i).reshape(-1, 1)
+        tri1 = np.column_stack([base[:, 0], base[:, 0] + 1, base[:, 0] + 3])
+        tri2 = np.column_stack([base[:, 0], base[:, 0] + 3, base[:, 0] + 2])
+        faces = np.empty((2 * (m - 1), 3), dtype=np.int32)
+        faces[0::2] = tri1
+        faces[1::2] = tri2
+
+        if self._ribbon_item is None:
+            self._ribbon_item = gl.GLMeshItem(
+                vertexes=verts, faces=faces,
+                color=(1.0, 0.82, 0.15, 0.92),
+                smooth=False, drawEdges=False,
+                glOptions='translucent', shader='shaded')
+            self.addItem(self._ribbon_item)
+        else:
+            self._ribbon_item.setMeshData(vertexes=verts, faces=faces)
+
     def clear_simulation_state(self) -> None:
         """Simülasyonu sıfırla: büyüyen fiberi kaldır, mandrel + taşıyıcıyı dinlenme konumuna döndür."""
-        for attr in ('_anim_fiber_item', '_eye_item', '_delivery_item'):
+        for attr in ('_anim_fiber_item', '_ribbon_item', '_eye_item',
+                     '_delivery_item'):
             item = getattr(self, attr, None)
             if item is not None:
                 self.removeItem(item)
@@ -827,6 +870,9 @@ class EntegreTasarimPaneli(QWidget):
         self._anim_x_mm:  object = None  # (N,)  f32 — carriage_x_actual_mm
         self._anim_eye:   object = None  # (N,3) f32 — payout gözü dünya koordinatları
         self._anim_r_mm:  object = None  # (N,)  f32 — current_radius_mm (katman büyümesi)
+        self._anim_rib_L: object = None  # (N,3) f32 — S4 tow ribbon sol kenar
+        self._anim_rib_R: object = None  # (N,3) f32 — S4 tow ribbon sağ kenar
+        self._anim_tow_w_mm: float = 6.0  # S4 ribbon genişliği (mm)
         self._anim_idx: int = 0
         self._anim_playing: bool = False
 
@@ -1462,6 +1508,12 @@ class EntegreTasarimPaneli(QWidget):
         # R1: tüm widget değerlerini ana thread'de topla, worker'a DÜZLÜK ver
         params = self._collect_params()
 
+        # S4: ribbon genişliği için temsilî tow (çok-katmanda ilk satır)
+        tow_w = params.tow_w_mm
+        if params.layer_rows:
+            tow_w = float(params.layer_rows[0].get("fitil_mm", tow_w))
+        self._anim_tow_w_mm = tow_w
+
         self._calc_gen += 1
         gen = self._calc_gen
 
@@ -1763,6 +1815,11 @@ class EntegreTasarimPaneli(QWidget):
             self._anim_x_mm  = x_act.astype(np.float32)
             self._anim_eye   = eye_xyz
             self._anim_r_mm  = r_now.astype(np.float32)
+
+            # S4: Tow ribbon kenarlarını önceden hesapla (fiziksel genişlik)
+            self._anim_rib_L, self._anim_rib_R = self._compute_ribbon_edges(
+                contact_xyz, a_deg, x_act, profile)
+
             self._anim_idx   = 0
 
             self._btn_play.setEnabled(True)
@@ -1775,6 +1832,55 @@ class EntegreTasarimPaneli(QWidget):
         except Exception:
             self._anim_lbl.setText("Animasyon hazırlanamadı.")
 
+    def _compute_ribbon_edges(self, contact_xyz, a_deg, x_act, profile):
+        """S4: Her temas noktası için tow ribbon sol/sağ kenarlarını hesapla.
+
+        Kenar = merkez ± (w/2)·ŵ,  ŵ = normalize(N × t)
+          N : yüzey dış normali (fiber_contact_model._surface_normal_unit,
+              panel eksen-X çerçevesine remap)
+          t : merkez çizgisi tanjantı (dünya koordinatları, komşu fark)
+        Genişlik fizikseldir (metre), piksel değil.
+        """
+        try:
+            from backend.core.fiber_contact_model import _surface_normal_unit
+        except Exception:
+            try:
+                from faz17_d1.core.fiber_contact_model import _surface_normal_unit
+            except Exception:
+                return None, None
+
+        n = len(contact_xyz)
+        if n < 2:
+            return None, None
+
+        P = np.asarray(contact_xyz, dtype=np.float64)
+
+        # Merkez çizgisi tanjantı (ileri fark; son nokta geri fark)
+        t = np.empty_like(P)
+        t[:-1] = P[1:] - P[:-1]
+        t[-1] = P[-1] - P[-2]
+        tn = np.linalg.norm(t, axis=1, keepdims=True)
+        t = t / np.maximum(tn, 1e-12)
+
+        # Yüzey normali (panel eksen-X çerçevesi): model (Xr,Yr,Zax)→panel (Zax,Xr,Yr)
+        a_rad = np.radians(a_deg)
+        N = np.empty((n, 3), dtype=np.float64)
+        for i in range(n):
+            nm = _surface_normal_unit(profile, float(x_act[i]), float(a_rad[i]))
+            N[i, 0] = nm[2]    # eksenel → panel X
+            N[i, 1] = nm[0]    # radyal x → panel Y
+            N[i, 2] = nm[1]    # radyal y → panel Z
+
+        # Yüzey içi dik yön ŵ = N × t (normalize)
+        w = np.cross(N, t)
+        wn = np.linalg.norm(w, axis=1, keepdims=True)
+        w = w / np.maximum(wn, 1e-12)
+
+        half_w_m = (self._anim_tow_w_mm * 0.5) / 1000.0
+        left = (P + half_w_m * w).astype(np.float32)
+        right = (P - half_w_m * w).astype(np.float32)
+        return left, right
+
     def _apply_anim_frame(self, idx: int) -> None:
         """Verilen indeksteki TwinState karesini 3D sahneye uygula."""
         if self._anim_xyz is None:
@@ -1786,8 +1892,11 @@ class EntegreTasarimPaneli(QWidget):
         r_mm  = float(self._anim_r_mm[idx]) if self._anim_r_mm is not None else None
         pts   = self._anim_xyz[:idx + 1]
         eye   = self._anim_eye[idx] if self._anim_eye is not None else None
+        rib_L = self._anim_rib_L[:idx + 1] if self._anim_rib_L is not None else None
+        rib_R = self._anim_rib_R[:idx + 1] if self._anim_rib_R is not None else None
         self._gl.set_simulation_state(a_deg, x_mm, pts,
-                                      eye_xyz=eye, surface_r_mm=r_mm)
+                                      eye_xyz=eye, surface_r_mm=r_mm,
+                                      ribbon_left=rib_L, ribbon_right=rib_R)
         self._anim_lbl.setText(
             f"X: {x_mm:.1f} mm  |  A: {a_deg:.0f}°  |  "
             f"r: {r_mm:.1f} mm  |  {idx}/{n-1}")
@@ -1818,6 +1927,8 @@ class EntegreTasarimPaneli(QWidget):
         self._anim_x_mm  = None
         self._anim_eye   = None
         self._anim_r_mm  = None
+        self._anim_rib_L = None
+        self._anim_rib_R = None
         self._anim_idx   = 0
         for attr in ('_btn_play', '_btn_pause', '_btn_stop_anim', '_btn_reset_anim'):
             if hasattr(self, attr):
