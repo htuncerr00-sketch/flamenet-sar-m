@@ -251,39 +251,119 @@ def _build_machine_frame(R_m: float, L_m: float) -> list:
     return items
 
 
-def _path_to_3d_lines(path_points, z_mm_profile, r_mm_profile) -> List[np.ndarray]:
-    """WindingPoint listesini 3D çizgi segmentlerine dönüştür (birim: metre)."""
+def _build_static_frame(R_m: float, L_m: float) -> list:
+    """Raylar, headstock, tailstock, zemin — taşıyıcı (carriage) HARİÇ. Birim: metre."""
+    items = []
+    overhang = max(0.20, L_m * 0.20)
+    xL = -overhang
+    xR = L_m + overhang
+    rail_y0 = -(R_m + 0.10)
+    rail_y1 = rail_y0 - 0.040
+    rail_z_half = R_m + 0.065
+    C_RAIL = (0.28, 0.30, 0.34, 1.0)
+    items.append(_box_mesh(xL, rail_y1, rail_z_half - 0.035,
+                            xR, rail_y0, rail_z_half + 0.035, C_RAIL))
+    items.append(_box_mesh(xL, rail_y1, -(rail_z_half + 0.035),
+                            xR, rail_y0, -(rail_z_half - 0.035), C_RAIL))
+    C_DARK = (0.17, 0.18, 0.22, 1.0)
+    beam_z = rail_z_half + 0.035
+    for xc in [xL + 0.03, L_m * 0.30, L_m * 0.60, xR - 0.03]:
+        items.append(_box_mesh(xc - 0.018, rail_y1 - 0.025, -beam_z,
+                                xc + 0.018, rail_y0,          beam_z, C_DARK))
+    C_HS = (0.18, 0.21, 0.28, 1.0)
+    hs_z  = R_m + 0.060
+    hs_y0 = rail_y1 - 0.035
+    hs_y1 = R_m + 0.045
+    items.append(_box_mesh(xL, hs_y0, -hs_z, -0.025, hs_y1, hs_z, C_HS))
+    items.append(_box_mesh(xL + 0.02, hs_y1, -R_m * 0.55,
+                            -0.036, hs_y1 + 0.085, R_m * 0.55,
+                            (0.14, 0.16, 0.20, 1.0)))
+    items.append(_disc_mesh(-0.025, R_m * 0.82, color=(0.22, 0.24, 0.30, 1.0)))
+    C_TS = (0.22, 0.24, 0.30, 1.0)
+    ts_z  = R_m + 0.045
+    ts_y0 = rail_y1 - 0.030
+    ts_y1 = R_m + 0.038
+    items.append(_box_mesh(L_m + 0.025, ts_y0, -ts_z, xR, ts_y1, ts_z, C_TS))
+    items.append(_disc_mesh(L_m + 0.025, R_m * 0.72, color=(0.28, 0.30, 0.36, 1.0)))
+    floor_y = rail_y1 - 0.048
+    floor_z = R_m + 0.130
+    items.append(_box_mesh(xL - 0.010, floor_y - 0.020, -floor_z,
+                            xR + 0.010, floor_y,          floor_z,
+                            (0.12, 0.12, 0.15, 1.0)))
+    return items
+
+
+def _build_carriage_at_zero(R_m: float, L_m: float) -> list:
+    """Taşıyıcı/nozul montajı X=0 merkezli inşa edilir; çağıran translate eder. Birim: metre."""
+    items = []
+    car_hw = max(0.055, L_m * 0.070)
+    car_z  = R_m + 0.072
+    rail_y0 = -(R_m + 0.10)
+    rail_y1 = rail_y0 - 0.040
+    C_CAR = (0.42, 0.22, 0.14, 1.0)
+    C_ARM = (0.48, 0.26, 0.16, 1.0)
+    C_SPL = (0.68, 0.65, 0.18, 0.92)
+    # Ray sürücüsü
+    items.append(_box_mesh(-car_hw, rail_y1 - 0.020, -car_z,
+                            car_hw, rail_y0 + 0.010,  car_z, C_CAR))
+    # Dikey kolon
+    col_hw = car_hw * 0.28
+    col_y1 = rail_y0 + R_m + 0.15
+    items.append(_box_mesh(-col_hw, rail_y0, -col_hw, col_hw, col_y1, col_hw, C_ARM))
+    # Yatay kol (payout arm)
+    arm_y = col_y1
+    arm_z = R_m + 0.035
+    items.append(_box_mesh(-car_hw * 0.50, arm_y,         -arm_z,
+                            car_hw * 0.50, arm_y + 0.020,  arm_z, C_ARM))
+    # Makara (payout head)
+    spool_r = 0.028
+    spool_y = arm_y + 0.011
+    items.append(_box_mesh(-0.022, spool_y,               -spool_r,
+                            0.022, spool_y + spool_r * 2,  spool_r, C_SPL))
+    # Fiber kılavuz rod
+    items.append(_box_mesh(-0.004, spool_y + spool_r * 2, -0.004,
+                            0.004, arm_y + R_m + 0.18,     0.004,
+                            (0.70, 0.70, 0.75, 0.60)))
+    return items
+
+
+def _path_to_3d_fast(path_points, z_mm_profile, r_mm_profile,
+                      ply_thickness_mm: float = 0.0) -> List[np.ndarray]:
+    """Vektörize: WindingPoint listesi → kat başına 3D çizgi dizisi (birim: metre).
+
+    R6 LOD: toplam > 50 000 nokta ise global_step ile indirgenir.
+    ply_thickness_mm: her katmana eklenen radyal ofset (Sprint 5 kalınlık).
+    """
     if not path_points:
         return []
 
     z_arr = np.asarray(z_mm_profile, dtype=np.float64)
     r_arr = np.asarray(r_mm_profile, dtype=np.float64)
-    z_center = (z_arr[0] + z_arr[-1]) / 2.0
+    z_center   = (z_arr[0] + z_arr[-1]) / 2.0
+    half_len_m = (z_arr[-1] - z_arr[0]) / 2000.0
 
-    by_layer = {}
+    by_layer: dict = {}
     for pt in path_points:
         by_layer.setdefault(pt.layer, []).append(pt)
 
+    MAX_PTS = 50_000
+    total = sum(len(v) for v in by_layer.values())
+    global_step = max(1, total // MAX_PTS) if total > MAX_PTS else 1
+
     result = []
     for layer_idx in sorted(by_layer):
-        pts_3d = []
-        for pt in by_layer[layer_idx]:
-            z_val = float(pt.x_mm)
-            a_rad = math.radians(float(pt.a_deg))
-            r_val = float(np.interp(z_val, z_arr, r_arr)) / 1000.0
-            xm = (z_val - z_center) / 1000.0 + (z_arr[-1] - z_arr[0]) / 2000.0
-            ym = r_val * math.cos(a_rad)
-            zm = r_val * math.sin(a_rad)
-            pts_3d.append([xm, ym, zm])
-
-        if len(pts_3d) < 2:
+        pts_l = by_layer[layer_idx][::global_step]
+        if len(pts_l) < 2:
             continue
-        arr = np.array(pts_3d, dtype=np.float32)
-        # Downsample for performance (8000 pts for smoother rope curves)
-        if len(arr) > 8000:
-            step = len(arr) // 8000 + 1
-            arr = arr[::step]
-        result.append(arr)
+        z_vals = np.array([float(p.x_mm)  for p in pts_l], dtype=np.float64)
+        a_rads = np.radians(
+            np.array([float(p.a_deg) for p in pts_l], dtype=np.float64))
+        r_base = np.interp(z_vals, z_arr, r_arr) / 1000.0
+        r_vals = r_base + (ply_thickness_mm / 1000.0) * layer_idx
+        xm = (z_vals - z_center) / 1000.0 + half_len_m
+        ym = r_vals * np.cos(a_rads)
+        zm = r_vals * np.sin(a_rads)
+        result.append(np.column_stack([xm, ym, zm]).astype(np.float32))
 
     return result
 
@@ -324,9 +404,13 @@ class _MachineGLView(gl.GLViewWidget):
         self._grid.setColor((0.20, 0.20, 0.25, 0.45))
         self.addItem(self._grid)
 
-        self._mandrel_items: list = []
-        self._frame_items:   list = []
-        self._fiber_items:   list = []
+        self._mandrel_items:   list = []
+        self._frame_items:     list = []   # statik: raylar, headstock, tailstock, zemin
+        self._carriage_items:  list = []   # dinamik: X boyunca hareket eder
+        self._fiber_items:     list = []   # hesap sonrası statik fiber yolları
+        self._anim_fiber_item       = None  # simülasyonda büyüyen GLLinePlotItem
+        self._anim_mandrel_angle: float = 0.0
+        self._carriage_x_m:  float = 0.0
 
         # Başlangıç sahnesi
         self._R_m = 0.050
@@ -342,7 +426,8 @@ class _MachineGLView(gl.GLViewWidget):
         self._L_m = max(0.010, length_mm / 1000.0)
         self._rebuild_scene()
 
-    def update_fiber_paths(self, profile, path) -> None:
+    def update_fiber_paths(self, profile, path,
+                           ply_thickness_mm: float = 0.0) -> None:
         for item in self._fiber_items:
             self.removeItem(item)
         self._fiber_items.clear()
@@ -351,10 +436,11 @@ class _MachineGLView(gl.GLViewWidget):
             return
 
         try:
-            layers_3d = _path_to_3d_lines(
+            layers_3d = _path_to_3d_fast(
                 path.points,
                 np.asarray(profile.z_mm),
                 np.asarray(profile.r_mm),
+                ply_thickness_mm=ply_thickness_mm,
             )
         except Exception:
             return
@@ -363,7 +449,8 @@ class _MachineGLView(gl.GLViewWidget):
             if len(pts) < 2:
                 continue
             col = _FIBER_COLORS[i % len(_FIBER_COLORS)]
-            line = gl.GLLinePlotItem(pos=pts, color=col, width=4.0, antialias=True, mode='line_strip')
+            line = gl.GLLinePlotItem(pos=pts, color=col, width=4.0,
+                                     antialias=True, mode='line_strip')
             self.addItem(line)
             self._fiber_items.append(line)
 
@@ -393,39 +480,105 @@ class _MachineGLView(gl.GLViewWidget):
         R = self._R_m
         L = self._L_m
 
-        # Eski nesneleri kaldır
-        for item in self._mandrel_items + self._frame_items:
+        # Eski tüm nesneleri kaldır
+        for item in (self._mandrel_items + self._frame_items
+                     + self._carriage_items):
             self.removeItem(item)
         self._mandrel_items.clear()
         self._frame_items.clear()
+        self._carriage_items.clear()
+        if self._anim_fiber_item is not None:
+            self.removeItem(self._anim_fiber_item)
+            self._anim_fiber_item = None
+        self._anim_mandrel_angle = 0.0
+        self._carriage_x_m = L / 2.0
 
-        # Mandrel — yarı saydam mavi-gri silindir
-        x0 = 0.0
-        x1 = L
-        cyl = _cyl_mesh(x0, x1, R, n=64,
-                         color=(0.50, 0.62, 0.76, 0.50))
+        # Mandrel — yarı saydam silindir
+        cyl = _cyl_mesh(0.0, L, R, n=64, color=(0.50, 0.62, 0.76, 0.50))
         self.addItem(cyl)
         self._mandrel_items.append(cyl)
-
-        # Mandrel kapakları
-        for xc in [x0, x1]:
+        # Kapaklar
+        for xc in [0.0, L]:
             cap = _disc_mesh(xc, R, color=(0.42, 0.54, 0.66, 0.70))
             self.addItem(cap)
             self._mandrel_items.append(cap)
+        # Döndürme göstergesi: 0° ve 180°'de çizgiler
+        xs = np.linspace(0.0, L, 60, dtype=np.float32)
+        for sign in [1.0, -1.0]:
+            pts = np.column_stack([xs,
+                                   np.full(60, sign * R * 1.003, dtype=np.float32),
+                                   np.zeros(60, dtype=np.float32)])
+            stripe = gl.GLLinePlotItem(pos=pts, color=(1.0, 0.55, 0.1, 0.9),
+                                       width=2, antialias=False)
+            self.addItem(stripe)
+            self._mandrel_items.append(stripe)
 
-        # Makine çerçevesi
-        frame_items = _build_machine_frame(R, L)
-        for item in frame_items:
+        # Statik çerçeve (raylar, headstock, tailstock, zemin)
+        for item in _build_static_frame(R, L):
             self.addItem(item)
-        self._frame_items.extend(frame_items)
+            self._frame_items.append(item)
 
-        # Zemin ızgarası konumu güncelle
+        # Taşıyıcı — başlangıçta mandrel ortasında
+        for item in _build_carriage_at_zero(R, L):
+            item.translate(self._carriage_x_m, 0, 0)
+            self.addItem(item)
+            self._carriage_items.append(item)
+
+        # Zemin ızgarası
         self._grid.resetTransform()
-        floor_y = -(R + 0.155)
-        self._grid.translate(L / 2.0, floor_y, 0.0)
+        self._grid.translate(L / 2.0, -(R + 0.155), 0.0)
 
-        # Kamera güncelle
         self._fit_camera(R, L)
+
+    # ── 4-eksen simülasyon API ────────────────────────────────────────────────
+
+    def set_simulation_state(self, a_deg: float, x_mm: float,
+                              pts_3d) -> None:
+        """4-eksen güncelleme: mandrel döndür, taşıyıcı kaydır, fiber büyüt."""
+        # 1. Mandrel dönüşü (X ekseni etrafında kümülatif)
+        delta = a_deg - self._anim_mandrel_angle
+        if abs(delta) > 0.05:
+            for item in self._mandrel_items:
+                item.resetTransform()
+                item.rotate(a_deg, 1, 0, 0, local=False)
+            self._anim_mandrel_angle = a_deg
+
+        # 2. Taşıyıcı X hareketi
+        x_m = float(np.clip(x_mm / 1000.0, 0.0, self._L_m))
+        dx = x_m - self._carriage_x_m
+        if abs(dx) > 1e-5:
+            for item in self._carriage_items:
+                item.translate(dx, 0, 0)
+            self._carriage_x_m = x_m
+
+        # 3. İlerleyen fiber
+        if pts_3d is not None and len(pts_3d) >= 2:
+            if self._anim_fiber_item is None:
+                self._anim_fiber_item = gl.GLLinePlotItem(
+                    pos=pts_3d, color=(1.0, 1.0, 0.15, 0.95),
+                    width=3.5, antialias=True, mode='line_strip')
+                self.addItem(self._anim_fiber_item)
+            else:
+                self._anim_fiber_item.setData(pos=pts_3d)
+
+        # 4. Nozul işaretçisi
+        if pts_3d is not None and len(pts_3d) >= 1:
+            self.set_head_position(pts_3d[-1])
+
+    def clear_simulation_state(self) -> None:
+        """Simülasyonu sıfırla: büyüyen fiberi kaldır, mandrel + taşıyıcıyı dinlenme konumuna döndür."""
+        if self._anim_fiber_item is not None:
+            self.removeItem(self._anim_fiber_item)
+            self._anim_fiber_item = None
+        for item in self._mandrel_items:
+            item.resetTransform()
+        self._anim_mandrel_angle = 0.0
+        target = self._L_m / 2.0
+        dx = target - self._carriage_x_m
+        for item in self._carriage_items:
+            item.translate(dx, 0, 0)
+        self._carriage_x_m = target
+        self.clear_head()
 
     def _fit_camera(self, R: float, L: float) -> None:
         dist = max(L * 1.6, R * 8.0)
@@ -600,11 +753,13 @@ class EntegreTasarimPaneli(QWidget):
         self._undo_stack = None
         self._build_ui()
         self._init_param_tracking()
-        # Animasyon durumu
+        # Animasyon durumu (4-eksen simülasyon)
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(33)  # ~30 FPS
         self._anim_timer.timeout.connect(self._anim_tick)
-        self._anim_xyz: object = None   # np.ndarray (N,3) veya None
+        self._anim_xyz:   object = None  # np.ndarray (N,3) float32 — 3D konumlar
+        self._anim_a_deg: object = None  # np.ndarray (N,)  float32 — iş mili açısı
+        self._anim_x_mm:  object = None  # np.ndarray (N,)  float32 — eksenel konum
         self._anim_idx: int = 0
         self._anim_playing: bool = False
 
@@ -846,14 +1001,33 @@ class EntegreTasarimPaneli(QWidget):
         self._btn_pause.setStyleSheet(_S_BTN_PRI)
         self._btn_pause.setEnabled(False)
         self._btn_pause.clicked.connect(self._on_anim_pause)
-        self._btn_reset_anim = QPushButton("⏹ Sıfırla")
+        self._btn_stop_anim = QPushButton("⏹ Durdur")
+        self._btn_stop_anim.setStyleSheet(_S_BTN_PRI)
+        self._btn_stop_anim.setEnabled(False)
+        self._btn_stop_anim.setToolTip("Mevcut konumda durdur (sıfırlamaz)")
+        self._btn_stop_anim.clicked.connect(self._on_anim_stop)
+        self._btn_reset_anim = QPushButton("↩ Sıfırla")
         self._btn_reset_anim.setStyleSheet(_S_BTN_PRI)
         self._btn_reset_anim.setEnabled(False)
         self._btn_reset_anim.clicked.connect(self._on_anim_reset)
         anim_btn_row.addWidget(self._btn_play)
         anim_btn_row.addWidget(self._btn_pause)
+        anim_btn_row.addWidget(self._btn_stop_anim)
         anim_btn_row.addWidget(self._btn_reset_anim)
         ga_v.addLayout(anim_btn_row)
+
+        # Hız seçici
+        speed_row = QHBoxLayout()
+        speed_lbl = QLabel("Hız:")
+        speed_lbl.setStyleSheet(f"color:{COLOR['text_secondary']};font-size:10px;")
+        self._cb_speed = QComboBox()
+        self._cb_speed.setStyleSheet(_S_COMBO)
+        for s in ["1×", "2×", "5×", "10×"]:
+            self._cb_speed.addItem(s)
+        speed_row.addWidget(speed_lbl)
+        speed_row.addWidget(self._cb_speed)
+        speed_row.addStretch()
+        ga_v.addLayout(speed_row)
 
         self._anim_slider = QSlider(Qt.Horizontal)
         self._anim_slider.setRange(0, 1000)
@@ -862,7 +1036,7 @@ class EntegreTasarimPaneli(QWidget):
         self._anim_slider.sliderMoved.connect(self._on_anim_seek)
         ga_v.addWidget(self._anim_slider)
 
-        self._anim_lbl = QLabel("Sarım kafası: —")
+        self._anim_lbl = QLabel("X: — mm  |  A: —°")
         self._anim_lbl.setStyleSheet(
             f"color:{COLOR['text_secondary']};font-size:10px;")
         ga_v.addWidget(self._anim_lbl)
@@ -1439,35 +1613,47 @@ class EntegreTasarimPaneli(QWidget):
     # ── Animasyon yönetimi ────────────────────────────────────────────────────
 
     def _setup_animation(self, path, profile) -> None:
-        """Hesap tamamlandı — animasyon verilerini hazırla."""
+        """Hesap tamamlandı — 4-eksen animasyon verilerini vektörize olarak hazırla."""
         self._stop_anim()
         if path is None or not getattr(path, 'points', None):
             return
         try:
             z_arr = np.asarray(profile.z_mm, dtype=np.float64)
             r_arr = np.asarray(profile.r_mm, dtype=np.float64)
-            z_center = (z_arr[0] + z_arr[-1]) / 2.0
+            z_center   = (z_arr[0] + z_arr[-1]) / 2.0
+            half_len_m = (z_arr[-1] - z_arr[0]) / 2000.0
+
             pts = path.points
-            # En fazla 2000 kare için örnekleme
-            step = max(1, len(pts) // 2000)
+            step = max(1, len(pts) // 3000)
             pts_sub = pts[::step]
-            xyz = []
-            for pt in pts_sub:
-                z_val = float(pt.x_mm)
-                a_rad = math.radians(float(pt.a_deg))
-                r_val = float(np.interp(z_val, z_arr, r_arr)) / 1000.0
-                xm = (z_val - z_center) / 1000.0 + (z_arr[-1] - z_arr[0]) / 2000.0
-                ym = r_val * math.cos(a_rad)
-                zm = r_val * math.sin(a_rad)
-                xyz.append([xm, ym, zm])
-            self._anim_xyz = np.array(xyz, dtype=np.float32) if xyz else None
-            self._anim_idx = 0
-            if self._anim_xyz is not None and len(self._anim_xyz) > 0:
-                self._btn_play.setEnabled(True)
-                self._btn_reset_anim.setEnabled(True)
-                self._anim_slider.setEnabled(True)
-                self._anim_slider.setValue(0)
-                self._gl.set_head_position(self._anim_xyz[0])
+            n = len(pts_sub)
+            if n == 0:
+                return
+
+            # Vektörize 3D konum hesabı
+            z_vals = np.array([float(p.x_mm)  for p in pts_sub], dtype=np.float64)
+            a_degs = np.array([float(p.a_deg) for p in pts_sub], dtype=np.float64)
+            a_rads = np.radians(a_degs)
+            r_vals = np.interp(z_vals, z_arr, r_arr) / 1000.0
+            xm = (z_vals - z_center) / 1000.0 + half_len_m
+            ym = r_vals * np.cos(a_rads)
+            zm = r_vals * np.sin(a_rads)
+
+            self._anim_xyz   = np.column_stack([xm, ym, zm]).astype(np.float32)
+            self._anim_a_deg = a_degs.astype(np.float32)
+            self._anim_x_mm  = z_vals.astype(np.float32)
+            self._anim_idx   = 0
+
+            self._btn_play.setEnabled(True)
+            self._btn_stop_anim.setEnabled(True)
+            self._btn_reset_anim.setEnabled(True)
+            self._anim_slider.setEnabled(True)
+            self._anim_slider.setValue(0)
+            # İlk durumu göster
+            self._gl.set_simulation_state(
+                float(self._anim_a_deg[0]),
+                float(self._anim_x_mm[0]),
+                self._anim_xyz[:1])
         except Exception:
             pass
 
@@ -1476,61 +1662,89 @@ class EntegreTasarimPaneli(QWidget):
             return
         self._anim_playing = True
         self._btn_pause.setEnabled(True)
+        self._btn_stop_anim.setEnabled(True)
         self._anim_timer.start()
 
     def _on_anim_pause(self) -> None:
         self._anim_playing = False
         self._anim_timer.stop()
 
+    def _on_anim_stop(self) -> None:
+        """Mevcut konumda durdur — sıfırlamaz."""
+        self._anim_timer.stop()
+        self._anim_playing = False
+        self._btn_pause.setEnabled(False)
+
     def _stop_anim(self) -> None:
         self._anim_timer.stop()
         self._anim_playing = False
-        self._anim_xyz = None
-        self._anim_idx = 0
-        if hasattr(self, '_btn_play'):
-            self._btn_play.setEnabled(False)
-        if hasattr(self, '_btn_pause'):
-            self._btn_pause.setEnabled(False)
-        if hasattr(self, '_btn_reset_anim'):
-            self._btn_reset_anim.setEnabled(False)
+        self._anim_xyz   = None
+        self._anim_a_deg = None
+        self._anim_x_mm  = None
+        self._anim_idx   = 0
+        for attr in ('_btn_play', '_btn_pause', '_btn_stop_anim', '_btn_reset_anim'):
+            if hasattr(self, attr):
+                getattr(self, attr).setEnabled(False)
         if hasattr(self, '_anim_slider'):
             self._anim_slider.setEnabled(False)
             self._anim_slider.setValue(0)
         if hasattr(self, '_anim_lbl'):
-            self._anim_lbl.setText("Sarım kafası: —")
+            self._anim_lbl.setText("X: — mm  |  A: —°")
         if hasattr(self, '_gl'):
-            self._gl.clear_head()
+            self._gl.clear_simulation_state()
 
     def _on_anim_reset(self) -> None:
         self._anim_timer.stop()
         self._anim_playing = False
         self._anim_idx = 0
-        if self._anim_xyz is not None and len(self._anim_xyz) > 0:
-            self._gl.set_head_position(self._anim_xyz[0])
+        if self._anim_xyz is not None and self._anim_a_deg is not None:
+            self._gl.set_simulation_state(
+                float(self._anim_a_deg[0]),
+                float(self._anim_x_mm[0]),
+                self._anim_xyz[:1])
         self._anim_slider.setValue(0)
+        self._anim_lbl.setText("X: — mm  |  A: —°  (başa sarıldı)")
 
     def _on_anim_seek(self, value: int) -> None:
-        if self._anim_xyz is None:
+        if self._anim_xyz is None or self._anim_a_deg is None:
             return
         n = len(self._anim_xyz)
-        self._anim_idx = int(value / 1000.0 * (n - 1))
-        self._anim_idx = max(0, min(n - 1, self._anim_idx))
-        self._gl.set_head_position(self._anim_xyz[self._anim_idx])
+        self._anim_idx = max(0, min(n - 1, int(value / 1000.0 * (n - 1))))
+        pts = self._anim_xyz[:self._anim_idx + 1]
+        a_deg = float(self._anim_a_deg[self._anim_idx])
+        x_mm  = float(self._anim_x_mm[self._anim_idx])
+        self._gl.set_simulation_state(a_deg, x_mm, pts)
+        self._anim_lbl.setText(
+            f"X: {x_mm:.1f} mm  |  A: {a_deg:.0f}°  |  {self._anim_idx}/{n-1}")
 
     def _anim_tick(self) -> None:
-        if self._anim_xyz is None:
+        if self._anim_xyz is None or self._anim_a_deg is None:
             self._anim_timer.stop()
             return
         n = len(self._anim_xyz)
-        step = max(1, n // 300)  # yaklaşık 10 saniyede tamamla
-        self._anim_idx = min(self._anim_idx + step, n - 1)
-        self._gl.set_head_position(self._anim_xyz[self._anim_idx])
+        try:
+            speed = int(
+                self._cb_speed.currentText().replace("×", "").replace("x", ""))
+        except Exception:
+            speed = 1
+        base_step = max(1, n // 300)
+        self._anim_idx = min(self._anim_idx + base_step * speed, n - 1)
+
+        a_deg = float(self._anim_a_deg[self._anim_idx])
+        x_mm  = float(self._anim_x_mm[self._anim_idx])
+        pts   = self._anim_xyz[:self._anim_idx + 1]
+
+        self._gl.set_simulation_state(a_deg, x_mm, pts)
+
         slider_val = int(self._anim_idx / max(1, n - 1) * 1000)
         self._anim_slider.setValue(slider_val)
-        self._anim_lbl.setText(f"Sarım kafası: nokta {self._anim_idx}/{n-1}")
+        self._anim_lbl.setText(
+            f"X: {x_mm:.1f} mm  |  A: {a_deg:.0f}°  |  {self._anim_idx}/{n-1}")
+
         if self._anim_idx >= n - 1:
             self._anim_timer.stop()
             self._anim_playing = False
+            self._btn_stop_anim.setEnabled(False)
 
     # ── G-kod üretimi ─────────────────────────────────────────────────────────
 
