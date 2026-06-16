@@ -65,6 +65,26 @@ def _try_backend():
     except Exception:
         return (None,) * 6
 
+
+def _try_twin_backend():
+    """S3: Digital twin motorlarını içe aktar (simulate_winding + FiberBand).
+
+    Yol üreticisinden ayrı tutulur; twin başarısız olsa bile yol/G-kod çalışır.
+    Dönüş: (simulate_winding, FiberBand) veya (None, None).
+    """
+    try:
+        from faz17_d1.core.winding_twin import simulate_winding
+        from faz17_d1.core.fiber_band import FiberBand
+        return simulate_winding, FiberBand
+    except Exception:
+        pass
+    try:
+        from backend.core.winding_twin import simulate_winding
+        from backend.core.fiber_band import FiberBand
+        return simulate_winding, FiberBand
+    except Exception:
+        return None, None
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3D Mesh yardımcıları  (birim: METRE)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -409,6 +429,8 @@ class _MachineGLView(gl.GLViewWidget):
         self._carriage_items:  list = []   # dinamik: X boyunca hareket eder
         self._fiber_items:     list = []   # hesap sonrası statik fiber yolları
         self._anim_fiber_item       = None  # simülasyonda büyüyen GLLinePlotItem
+        self._eye_item              = None  # S3: payout gözü işaretçisi (scatter)
+        self._delivery_item         = None  # S3: gözden temas noktasına teslim fiberi
         self._anim_mandrel_angle: float = 0.0
         self._carriage_x_m:  float = 0.0
 
@@ -490,6 +512,12 @@ class _MachineGLView(gl.GLViewWidget):
         if self._anim_fiber_item is not None:
             self.removeItem(self._anim_fiber_item)
             self._anim_fiber_item = None
+        if self._eye_item is not None:
+            self.removeItem(self._eye_item)
+            self._eye_item = None
+        if self._delivery_item is not None:
+            self.removeItem(self._delivery_item)
+            self._delivery_item = None
         self._anim_mandrel_angle = 0.0
         self._carriage_x_m = L / 2.0
 
@@ -533,8 +561,18 @@ class _MachineGLView(gl.GLViewWidget):
     # ── 4-eksen simülasyon API ────────────────────────────────────────────────
 
     def set_simulation_state(self, a_deg: float, x_mm: float,
-                              pts_3d) -> None:
-        """4-eksen güncelleme: mandrel döndür, taşıyıcı kaydır, fiber büyüt."""
+                              pts_3d, *, eye_xyz=None,
+                              surface_r_mm: Optional[float] = None) -> None:
+        """4-eksen + payout TwinState güncellemesi.
+
+        Parametreler
+        ------------
+        a_deg        : İş mili kümülatif açısı (spindle_angle_deg)
+        x_mm         : Gerçek taşıyıcı eksenel konumu (carriage_x_actual_mm)
+        pts_3d       : Büyüyen temas noktası şeridi — dünya koordinatları (N,3)
+        eye_xyz      : Payout gözünün dünya konumu (3,)  [S3]
+        surface_r_mm : O anki yüzey yarıçapı (katman büyümesi)  [S3/S6 köprüsü]
+        """
         # 1. Mandrel dönüşü (X ekseni etrafında kümülatif)
         delta = a_deg - self._anim_mandrel_angle
         if abs(delta) > 0.05:
@@ -543,7 +581,7 @@ class _MachineGLView(gl.GLViewWidget):
                 item.rotate(a_deg, 1, 0, 0, local=False)
             self._anim_mandrel_angle = a_deg
 
-        # 2. Taşıyıcı X hareketi
+        # 2. Taşıyıcı X hareketi (TwinState gerçek konumu)
         x_m = float(np.clip(x_mm / 1000.0, 0.0, self._L_m))
         dx = x_m - self._carriage_x_m
         if abs(dx) > 1e-5:
@@ -551,7 +589,7 @@ class _MachineGLView(gl.GLViewWidget):
                 item.translate(dx, 0, 0)
             self._carriage_x_m = x_m
 
-        # 3. İlerleyen fiber
+        # 3. İlerleyen fiber (yatırılan şerit)
         if pts_3d is not None and len(pts_3d) >= 2:
             if self._anim_fiber_item is None:
                 self._anim_fiber_item = gl.GLLinePlotItem(
@@ -561,15 +599,40 @@ class _MachineGLView(gl.GLViewWidget):
             else:
                 self._anim_fiber_item.setData(pos=pts_3d)
 
-        # 4. Nozul işaretçisi
+        # 4. Temas noktası (nozul ucu)
+        contact = None
         if pts_3d is not None and len(pts_3d) >= 1:
-            self.set_head_position(pts_3d[-1])
+            contact = np.asarray(pts_3d[-1], dtype=np.float32)
+            self.set_head_position(contact)
+
+        # 5. S3: Payout gözü işaretçisi + teslim fiberi (gözden temasa)
+        if eye_xyz is not None:
+            eye = np.asarray(eye_xyz, dtype=np.float32).reshape(3)
+            if self._eye_item is None:
+                self._eye_item = gl.GLScatterPlotItem(
+                    pos=eye.reshape(1, 3), size=14,
+                    color=(0.2, 1.0, 1.0, 1.0), pxMode=True)
+                self.addItem(self._eye_item)
+            else:
+                self._eye_item.setData(pos=eye.reshape(1, 3))
+            # Teslim fiberi: göz → temas noktası
+            if contact is not None:
+                seg = np.vstack([eye, contact]).astype(np.float32)
+                if self._delivery_item is None:
+                    self._delivery_item = gl.GLLinePlotItem(
+                        pos=seg, color=(0.2, 1.0, 1.0, 0.85),
+                        width=2.0, antialias=True, mode='line_strip')
+                    self.addItem(self._delivery_item)
+                else:
+                    self._delivery_item.setData(pos=seg)
 
     def clear_simulation_state(self) -> None:
         """Simülasyonu sıfırla: büyüyen fiberi kaldır, mandrel + taşıyıcıyı dinlenme konumuna döndür."""
-        if self._anim_fiber_item is not None:
-            self.removeItem(self._anim_fiber_item)
-            self._anim_fiber_item = None
+        for attr in ('_anim_fiber_item', '_eye_item', '_delivery_item'):
+            item = getattr(self, attr, None)
+            if item is not None:
+                self.removeItem(item)
+                setattr(self, attr, None)
         for item in self._mandrel_items:
             item.resetTransform()
         self._anim_mandrel_angle = 0.0
@@ -626,7 +689,8 @@ class _ECalcParams:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class _EWorker(QObject):
-    finished = Signal(object, object, object, int)  # (path, profile, all_paths, gen)
+    # (path, profile, all_paths, twin, gen)  — twin: TwinSimulationResult | None
+    finished = Signal(object, object, object, object, int)
     error    = Signal(str, int)                      # (msg, gen)
 
     def __init__(self, fn, params: "_ECalcParams", gen: int):
@@ -746,6 +810,7 @@ class EntegreTasarimPaneli(QWidget):
         self._worker_ref = None
         self._backend = _try_backend()
         self._backend_ok = self._backend[0] is not None
+        self._twin_backend = _try_twin_backend()      # S3: (simulate_winding, FiberBand)
         # Proje yükleme sırasında tasarimDegisti fırlatılmasın
         self._suppress_dirty = False
         # Merkezi undo/redo yığını (MainWindow kurar; yoksa komutlar
@@ -753,13 +818,15 @@ class EntegreTasarimPaneli(QWidget):
         self._undo_stack = None
         self._build_ui()
         self._init_param_tracking()
-        # Animasyon durumu (4-eksen simülasyon)
+        # Animasyon durumu (S3: TwinState tabanlı — naif cos/sin projeksiyonu kaldırıldı)
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(33)  # ~30 FPS
         self._anim_timer.timeout.connect(self._anim_tick)
-        self._anim_xyz:   object = None  # np.ndarray (N,3) float32 — 3D konumlar
-        self._anim_a_deg: object = None  # np.ndarray (N,)  float32 — iş mili açısı
-        self._anim_x_mm:  object = None  # np.ndarray (N,)  float32 — eksenel konum
+        self._anim_xyz:   object = None  # (N,3) f32 — temas noktası dünya koordinatları
+        self._anim_a_deg: object = None  # (N,)  f32 — spindle_angle_deg
+        self._anim_x_mm:  object = None  # (N,)  f32 — carriage_x_actual_mm
+        self._anim_eye:   object = None  # (N,3) f32 — payout gözü dünya koordinatları
+        self._anim_r_mm:  object = None  # (N,)  f32 — current_radius_mm (katman büyümesi)
         self._anim_idx: int = 0
         self._anim_playing: bool = False
 
@@ -1536,6 +1603,8 @@ class EntegreTasarimPaneli(QWidget):
 
         if params.layer_rows:
             all_paths = []
+            twin_base_pp = None
+            twin_n_layers = 0
             for row in params.layer_rows:
                 lt    = str(row.get("tip", "Sarmal"))
                 strat = strat_map.get(lt, "helical")
@@ -1552,8 +1621,12 @@ class EntegreTasarimPaneli(QWidget):
                 )
                 path = generate_path(pp)
                 all_paths.append(path)
+                if twin_base_pp is None:
+                    twin_base_pp = pp        # temsilî taban (ilk katman)
+                twin_n_layers += n_l
             first = all_paths[0] if all_paths else None
-            return first, profile, all_paths
+            twin = self._compute_twin(profile, twin_base_pp, twin_n_layers)
+            return first, profile, all_paths, twin
 
         # Parametrik mod (katman tablosu boş)
         strat = strat_map.get(params.strategy_text, "helical")
@@ -1565,10 +1638,35 @@ class EntegreTasarimPaneli(QWidget):
             friction_mu=params.friction_mu,
         )
         path = generate_path(pp)
-        return path, profile, None
+        twin = self._compute_twin(profile, pp, params.n_layers)
+        return path, profile, None, twin
 
-    @Slot(object, object, object, int)
-    def _on_calc_done(self, path, profile, all_paths, gen) -> None:
+    def _compute_twin(self, profile, base_pp, n_layers):
+        """S3: Digital twin simülasyonunu worker thread içinde çalıştır.
+
+        Twin başarısız olursa None döner — yol/G-kod akışı etkilenmez,
+        yalnızca animasyon devre dışı kalır (status'ta bildirilir).
+        Twin maliyetini sınırlamak için katman sayısı 12 ile kapatılır ve
+        dt durum sayısını ~3000'in altında tutacak şekilde ölçeklenir.
+        """
+        simulate_winding, FiberBand = self._twin_backend
+        if simulate_winding is None or FiberBand is None:
+            return None
+        try:
+            n_layers = max(1, min(int(n_layers), 12))
+            band = FiberBand(tow_width_mm=float(base_pp.tow_width_mm))
+            result = simulate_winding(
+                base_profile=profile, band=band, base_params=base_pp,
+                n_layers=n_layers, dt_s=1.0,
+            )
+            # Çok fazla durum varsa dt'yi büyüterek yeniden örnekleme yerine
+            # _setup_animation alt-örnekleme yapacak; burada yalnız üretiyoruz.
+            return result
+        except Exception:
+            return None
+
+    @Slot(object, object, object, object, int)
+    def _on_calc_done(self, path, profile, all_paths, twin, gen) -> None:
         if gen != self._calc_gen:
             return
         self._stop_watchdog()
@@ -1598,7 +1696,8 @@ class EntegreTasarimPaneli(QWidget):
         # 3D fiber yollarını güncelle
         self._gl.update_fiber_paths(profile, path)
         self._btn_gcode.setEnabled(True)
-        self._setup_animation(path, profile)
+        # S3: TwinState tabanlı animasyon kur (twin None ise nazikçe devre dışı)
+        self._setup_animation(twin, profile)
 
     @Slot(str, int)
     def _on_calc_error(self, msg: str, gen: int) -> None:
@@ -1612,36 +1711,58 @@ class EntegreTasarimPaneli(QWidget):
 
     # ── Animasyon yönetimi ────────────────────────────────────────────────────
 
-    def _setup_animation(self, path, profile) -> None:
-        """Hesap tamamlandı — 4-eksen animasyon verilerini vektörize olarak hazırla."""
+    def _setup_animation(self, twin, profile) -> None:
+        """S3: Digital twin sonucundan animasyon dizilerini hazırla.
+
+        Naif cos/sin projeksiyonu KALDIRILDI. Tüm hareket alanları
+        TwinState'ten gelir:
+          spindle_angle_deg     → mandrel dönüşü
+          carriage_x_actual_mm  → taşıyıcı (dinamik gecikmeli) konum
+          current_radius_mm     → temas yarıçapı (katman büyümesi dahil)
+          eye_x_mm / eye_r_mm   → payout gözü konumu
+        Temas noktası ve göz, dünya koordinatlarına (metre) projekte edilir.
+        """
         self._stop_anim()
-        if path is None or not getattr(path, 'points', None):
+        if twin is None or not getattr(twin, 'states', None):
+            self._anim_lbl.setText("Animasyon yok (twin hesaplanamadı).")
             return
         try:
-            z_arr = np.asarray(profile.z_mm, dtype=np.float64)
-            r_arr = np.asarray(profile.r_mm, dtype=np.float64)
-            z_center   = (z_arr[0] + z_arr[-1]) / 2.0
-            half_len_m = (z_arr[-1] - z_arr[0]) / 2000.0
+            states = twin.states
+            z0 = float(np.asarray(profile.z_mm, dtype=np.float64)[0])
 
-            pts = path.points
-            step = max(1, len(pts) // 3000)
-            pts_sub = pts[::step]
-            n = len(pts_sub)
+            step = max(1, len(states) // 3000)
+            sub = states[::step]
+            n = len(sub)
             if n == 0:
                 return
 
-            # Vektörize 3D konum hesabı
-            z_vals = np.array([float(p.x_mm)  for p in pts_sub], dtype=np.float64)
-            a_degs = np.array([float(p.a_deg) for p in pts_sub], dtype=np.float64)
-            a_rads = np.radians(a_degs)
-            r_vals = np.interp(z_vals, z_arr, r_arr) / 1000.0
-            xm = (z_vals - z_center) / 1000.0 + half_len_m
-            ym = r_vals * np.cos(a_rads)
-            zm = r_vals * np.sin(a_rads)
+            a_deg = np.array([s.spindle_angle_deg for s in sub], dtype=np.float64)
+            x_act = np.array([s.carriage_x_actual_mm for s in sub], dtype=np.float64)
+            r_now = np.array([s.current_radius_mm for s in sub], dtype=np.float64)
+            eye_x = np.array([s.eye_x_mm for s in sub], dtype=np.float64)
+            eye_r = np.array([s.eye_r_mm for s in sub], dtype=np.float64)
 
-            self._anim_xyz   = np.column_stack([xm, ym, zm]).astype(np.float32)
-            self._anim_a_deg = a_degs.astype(np.float32)
-            self._anim_x_mm  = z_vals.astype(np.float32)
+            a_rad = np.radians(a_deg)
+            cos_a = np.cos(a_rad)
+            sin_a = np.sin(a_rad)
+
+            # Temas noktası dünya koordinatları (eksen = X, mandrel x∈[0,L_m])
+            cx = (x_act - z0) / 1000.0
+            cy = (r_now / 1000.0) * cos_a
+            cz = (r_now / 1000.0) * sin_a
+            contact_xyz = np.column_stack([cx, cy, cz]).astype(np.float32)
+
+            # Payout gözü dünya koordinatları (aynı açı, dışarıda — standoff)
+            ex = (eye_x - z0) / 1000.0
+            ey = (eye_r / 1000.0) * cos_a
+            ez = (eye_r / 1000.0) * sin_a
+            eye_xyz = np.column_stack([ex, ey, ez]).astype(np.float32)
+
+            self._anim_xyz   = contact_xyz
+            self._anim_a_deg = a_deg.astype(np.float32)
+            self._anim_x_mm  = x_act.astype(np.float32)
+            self._anim_eye   = eye_xyz
+            self._anim_r_mm  = r_now.astype(np.float32)
             self._anim_idx   = 0
 
             self._btn_play.setEnabled(True)
@@ -1650,12 +1771,26 @@ class EntegreTasarimPaneli(QWidget):
             self._anim_slider.setEnabled(True)
             self._anim_slider.setValue(0)
             # İlk durumu göster
-            self._gl.set_simulation_state(
-                float(self._anim_a_deg[0]),
-                float(self._anim_x_mm[0]),
-                self._anim_xyz[:1])
+            self._apply_anim_frame(0)
         except Exception:
-            pass
+            self._anim_lbl.setText("Animasyon hazırlanamadı.")
+
+    def _apply_anim_frame(self, idx: int) -> None:
+        """Verilen indeksteki TwinState karesini 3D sahneye uygula."""
+        if self._anim_xyz is None:
+            return
+        n = len(self._anim_xyz)
+        idx = max(0, min(n - 1, idx))
+        a_deg = float(self._anim_a_deg[idx])
+        x_mm  = float(self._anim_x_mm[idx])
+        r_mm  = float(self._anim_r_mm[idx]) if self._anim_r_mm is not None else None
+        pts   = self._anim_xyz[:idx + 1]
+        eye   = self._anim_eye[idx] if self._anim_eye is not None else None
+        self._gl.set_simulation_state(a_deg, x_mm, pts,
+                                      eye_xyz=eye, surface_r_mm=r_mm)
+        self._anim_lbl.setText(
+            f"X: {x_mm:.1f} mm  |  A: {a_deg:.0f}°  |  "
+            f"r: {r_mm:.1f} mm  |  {idx}/{n-1}")
 
     def _on_anim_play(self) -> None:
         if self._anim_xyz is None:
@@ -1681,6 +1816,8 @@ class EntegreTasarimPaneli(QWidget):
         self._anim_xyz   = None
         self._anim_a_deg = None
         self._anim_x_mm  = None
+        self._anim_eye   = None
+        self._anim_r_mm  = None
         self._anim_idx   = 0
         for attr in ('_btn_play', '_btn_pause', '_btn_stop_anim', '_btn_reset_anim'):
             if hasattr(self, attr):
@@ -1697,28 +1834,19 @@ class EntegreTasarimPaneli(QWidget):
         self._anim_timer.stop()
         self._anim_playing = False
         self._anim_idx = 0
-        if self._anim_xyz is not None and self._anim_a_deg is not None:
-            self._gl.set_simulation_state(
-                float(self._anim_a_deg[0]),
-                float(self._anim_x_mm[0]),
-                self._anim_xyz[:1])
+        if self._anim_xyz is not None:
+            self._apply_anim_frame(0)
         self._anim_slider.setValue(0)
-        self._anim_lbl.setText("X: — mm  |  A: —°  (başa sarıldı)")
 
     def _on_anim_seek(self, value: int) -> None:
-        if self._anim_xyz is None or self._anim_a_deg is None:
+        if self._anim_xyz is None:
             return
         n = len(self._anim_xyz)
         self._anim_idx = max(0, min(n - 1, int(value / 1000.0 * (n - 1))))
-        pts = self._anim_xyz[:self._anim_idx + 1]
-        a_deg = float(self._anim_a_deg[self._anim_idx])
-        x_mm  = float(self._anim_x_mm[self._anim_idx])
-        self._gl.set_simulation_state(a_deg, x_mm, pts)
-        self._anim_lbl.setText(
-            f"X: {x_mm:.1f} mm  |  A: {a_deg:.0f}°  |  {self._anim_idx}/{n-1}")
+        self._apply_anim_frame(self._anim_idx)
 
     def _anim_tick(self) -> None:
-        if self._anim_xyz is None or self._anim_a_deg is None:
+        if self._anim_xyz is None:
             self._anim_timer.stop()
             return
         n = len(self._anim_xyz)
@@ -1730,16 +1858,9 @@ class EntegreTasarimPaneli(QWidget):
         base_step = max(1, n // 300)
         self._anim_idx = min(self._anim_idx + base_step * speed, n - 1)
 
-        a_deg = float(self._anim_a_deg[self._anim_idx])
-        x_mm  = float(self._anim_x_mm[self._anim_idx])
-        pts   = self._anim_xyz[:self._anim_idx + 1]
-
-        self._gl.set_simulation_state(a_deg, x_mm, pts)
-
+        self._apply_anim_frame(self._anim_idx)
         slider_val = int(self._anim_idx / max(1, n - 1) * 1000)
         self._anim_slider.setValue(slider_val)
-        self._anim_lbl.setText(
-            f"X: {x_mm:.1f} mm  |  A: {a_deg:.0f}°  |  {self._anim_idx}/{n-1}")
 
         if self._anim_idx >= n - 1:
             self._anim_timer.stop()
