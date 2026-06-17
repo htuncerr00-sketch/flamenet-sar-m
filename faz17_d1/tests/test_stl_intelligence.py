@@ -1,5 +1,5 @@
 """
-tests/test_stl_intelligence.py — STL Intelligence Layer doğrulama (T1-T14)
+tests/test_stl_intelligence.py — STL Intelligence Layer doğrulama (T1-T18)
 ===========================================================================
 Sentetik vertex bulutları (gerçek .stl gerekmez) ile STL Intelligence ve
 MandrelModel'i doğrular. Determinizm: sabit seed.
@@ -10,6 +10,7 @@ MandrelModel'i doğrular. Determinizm: sabit seed.
 Kabul: tüm assert'ler geçer; T1-T5 grade YÜKSEK; T6 doğru eksen;
 T7/T8 doğru RED; ASCII/binary tutarlılık.
 """
+import copy
 import math
 import os
 import sys
@@ -20,6 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "faz17_d1_backe
 
 from faz17_d1.core.stl_intelligence import (
     analyze_vertices, solve_axis, extract_radius_profile, segment_regions,
+    TurnaroundCandidate, TurnaroundCandidates, QualityReport,
 )
 from faz17_d1.core.mandrel_model import MandrelModel
 
@@ -253,13 +255,137 @@ def t_determinism():
     print("  Determinism: aynı girdi → bit-aynı çıktı ✓")
 
 
+# ── Yardımcı: son derece dar kutup profili ────────────────────────────────────
+
+def _tiny_pole_vertices(R=50.0, L=100.0, H=50.0, n=200):
+    """Sinüsoidal dome ile kutup r→0 (clamp'tan önce 0.05mm). Eksen = X."""
+    zc = np.linspace(0, 2 * H + L, n)
+    rvals = []
+    for z in zc:
+        if z <= H:
+            # sin(0) = 0 → kutup tamamen kapanıyor
+            r = max(R * math.sin(math.pi * z / (2 * H)), 0.05)
+        elif z <= H + L:
+            r = R
+        else:
+            d = z - (H + L)
+            r = max(R * math.sin(math.pi * (H - d) / (2 * H)), 0.05)
+        rvals.append(r)
+    return _surface(zc, np.array(rvals), n_axial=n)
+
+
+# ── T15: Torus → single_valued=False (katı kontrol) ─────────────────────────
+
+def t15_torus_single_valued():
+    """Eşik düzeltmesi sonrası torus kesinlikle single_valued=False."""
+    Rt, rt = 60.0, 20.0
+    pts = []
+    for u in np.linspace(0, 2 * np.pi, 80, endpoint=False):
+        for v in np.linspace(0, 2 * np.pi, 40, endpoint=False):
+            x = rt * math.sin(v)
+            rr = Rt + rt * math.cos(v)
+            pts.append([x, rr * math.cos(u), rr * math.sin(u)])
+    V = np.array(pts)
+    rep = analyze_vertices(V)
+    check(not rep.quality.is_single_valued,
+          f"T15 torus single_valued=False (got {rep.quality.is_single_valued})")
+    check(rep.confidence.grade == "REDDET",
+          f"T15 torus grade=REDDET (got {rep.confidence.grade})")
+    print(f"  T15 torus strict: single={rep.quality.is_single_valued}, "
+          f"grade={rep.confidence.grade} ✓")
+
+
+# ── T16: Erişilemez turnaround → is_winding_ready=False ──────────────────────
+
+def t16_no_reachable_turnaround():
+    """Tüm turnaround adayları erişilemez → is_winding_ready=False."""
+    V = cylinder(R=50, L=300)
+    rep = analyze_vertices(V)
+
+    # Temel: iyi silindir winding-ready olmalı
+    check(rep.is_winding_ready(),
+          "T16 baseline silindir winding-ready")
+
+    # Tüm turnaround'ları 'erişilemez' (z_right < z_left) yap
+    mock_turn = TurnaroundCandidates()
+    for a in list(rep.turnaround_candidates.by_alpha.keys()):
+        mock_turn.by_alpha[a] = TurnaroundCandidate(
+            alpha_deg=a, z_left_mm=200.0, z_right_mm=50.0,
+            polar_radius_c_mm=0.0, reachable=False)
+
+    rep2 = copy.copy(rep)
+    rep2.turnaround_candidates = mock_turn
+
+    check(not rep2.is_winding_ready(),
+          "T16 turnaround yok → is_winding_ready=False")
+    print(f"  T16 no turnaround: ready={rep2.is_winding_ready()} "
+          f"(beklenen False) ✓")
+
+
+# ── T17: Çok küçük kutup → is_winding_ready=False ────────────────────────────
+
+def t17_small_pole():
+    """quality.min_radius_mm < r_max*0.02 → is_winding_ready=False.
+
+    p95 tabanlı profil çıkarımı gerçek kutup minimumunu yansıtmaz;
+    bu yüzden is_winding_ready() kriterini doğrudan mock quality ile test et.
+    """
+    V = cylinder(R=50, L=300)
+    rep = analyze_vertices(V)
+    check(rep.is_winding_ready(), "T17 baseline hazır")
+
+    r_max = float(rep.profile.r_mm.max())
+    # Kutup yarıçapını eşiğin altına ayarla: r_max*0.005 < r_max*0.02
+    tiny_quality = QualityReport(
+        aspect_ratio=rep.quality.aspect_ratio,
+        min_radius_mm=r_max * 0.005,
+        is_single_valued=True,
+        asymmetry_mm=rep.quality.asymmetry_mm,
+        degenerate_tri_count=rep.quality.degenerate_tri_count,
+        mesh_density=rep.quality.mesh_density,
+        winding_suitable=False,
+        reasons=["Kutup yarıçapı çok küçük."],
+    )
+    rep2 = copy.copy(rep)
+    rep2.quality = tiny_quality
+
+    check(rep2.quality.min_radius_mm < r_max * 0.02,
+          f"T17 r_min={rep2.quality.min_radius_mm:.3f} < {r_max*0.02:.3f}mm")
+    check(not rep2.is_winding_ready(),
+          "T17 küçük kutup → is_winding_ready=False")
+    print(f"  T17 small pole: r_min={rep2.quality.min_radius_mm:.3f}mm "
+          f"(eşik={r_max*0.02:.3f}mm), ready={rep2.is_winding_ready()} ✓")
+
+
+# ── T18: Yüksek güven + geçerli turnaround → is_winding_ready=True ───────────
+
+def t18_winding_ready():
+    """Standart silindir: yüksek güven + erişilebilir turnaround → True."""
+    V = cylinder(R=50, L=300)
+    rep = analyze_vertices(V)
+    check(rep.confidence.aggregate >= 0.65,
+          f"T18 agregat güven ≥ 0.65 (got {rep.confidence.aggregate:.3f})")
+    reachable_count = sum(
+        1 for tc in rep.turnaround_candidates.by_alpha.values() if tc.reachable)
+    check(reachable_count > 0,
+          f"T18 erişilebilir turnaround var ({reachable_count})")
+    check(rep.is_winding_ready(),
+          "T18 is_winding_ready=True")
+    print(f"  T18 winding ready: confidence={rep.confidence.aggregate:.3f}, "
+          f"grade={rep.confidence.grade}, "
+          f"turnaround_reachable={reachable_count}, "
+          f"ready={rep.is_winding_ready()} ✓")
+
+
 def main():
     print("=" * 70)
-    print("STL Intelligence Layer — T1-T14 doğrulama")
+    print("STL Intelligence Layer — T1-T18 doğrulama")
     print("=" * 70)
     for fn in [t1_aligned_cylinder, t2_tilted_cylinder, t3_offcenter_cylinder,
                t4_dome_cyl_dome, t5_cone, t6_short_fat, t7_sphere, t8_torus,
-               t13_turnaround, t_model_roundtrip, t_determinism]:
+               t13_turnaround, t_model_roundtrip, t_determinism,
+               t15_torus_single_valued, t16_no_reachable_turnaround,
+               t17_small_pole, t18_winding_ready]:
         try:
             fn()
         except Exception as exc:

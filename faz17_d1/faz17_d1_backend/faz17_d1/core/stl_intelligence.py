@@ -142,6 +142,39 @@ class StlIntelligenceReport:
     source_path: Optional[str] = None
     units: str = "mm"
 
+    def is_winding_ready(self, min_confidence: float = 0.65) -> bool:
+        """Sarma uygunluğu — tek karar noktası.
+
+        Tüm kriterleri kapsar; backend başka bir yerde ayrıca karar vermez:
+        - Güven derecesi ≠ REDDET
+        - Tek-değerli profil (torus/çok-değerli değil)
+        - Eksen dejenere değil (küre/izotropik kütle)
+        - Asimetri düşük (< r_max × 10%)
+        - Kutup yarıçapı yeterli (≥ r_max × 2%)
+        - Agregat güven ≥ min_confidence
+        - En az bir erişilebilir turnaround adayı
+        """
+        c = self.confidence
+        q = self.quality
+
+        if c.grade == "REDDET":
+            return False
+        if not q.is_single_valued:
+            return False
+        if self.axis.degeneracy_flag:
+            return False
+        r_max = float(self.profile.r_mm.max())
+        if q.asymmetry_mm > r_max * 0.10:
+            return False
+        if q.min_radius_mm < r_max * 0.02:
+            return False
+        if c.aggregate < min_confidence:
+            return False
+        if not any(tc.reachable
+                   for tc in self.turnaround_candidates.by_alpha.values()):
+            return False
+        return True
+
     def human_summary(self) -> str:
         c = self.confidence
         q = self.quality
@@ -352,9 +385,11 @@ def extract_radius_profile(vertices: np.ndarray, axis: AxisResult,
     pole_clamped = bool(np.any(r < clamp))
     r = np.maximum(r, clamp)
 
-    # Tek-değerlilik (torus testi): dilim içi rho yayılımı r'ye göre çok büyükse
+    # Tek-değerlilik (torus testi): dilim içi rho yayılımı r'ye göre çok büyükse.
+    # Eşik 0.25: torus gibi çok-değerli yüzeyler medyan > 0.25 yayılım gösterir;
+    # silindir/kubbe yüzey gürültüsü < 0.05 kalır.
     rel_spread = spread[nz] / np.maximum(r[nz], 1e-9)
-    is_single_valued = bool(np.median(rel_spread) < 0.5)
+    is_single_valued = bool(np.median(rel_spread) < 0.25)
 
     rp = RadiusProfile(z_mm=centers, r_mm=r, n_per_bin=n_per_bin,
                        pole_clamped=pole_clamped)
@@ -459,17 +494,40 @@ def detect_pole_regions(rp: RadiusProfile, seg: RegionSegmentation) -> List[Pole
 # Bileşen 6 — Turnaround Candidate Detection
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Varsayılan aday sarma açıları (geriye-uyumlu sabit liste).
+# Gelecekte alpha_step_deg ile 5°-85° arasında otomatik üretilebilir.
+_TURNAROUND_ALPHA_DEFAULTS: List[float] = [10.0, 20.0, 30.0, 45.0, 55.0, 70.0, 80.0]
+
+
+def _default_alpha_range(step_deg: float = 5.0) -> List[float]:
+    """5°-85° arasında step_deg adımıyla α listesi üret."""
+    alphas: List[float] = []
+    a = 5.0
+    while a <= 85.0 + 1e-9:
+        alphas.append(float(a))
+        a += float(step_deg)
+    return alphas
+
+
 def detect_turnaround_candidates(
         profile: MandrelProfile,
-        alphas_deg: Optional[List[float]] = None) -> TurnaroundCandidates:
+        alphas_deg: Optional[List[float]] = None,
+        *,
+        alpha_step_deg: float = 0.0) -> TurnaroundCandidates:
     """
     Aday α'lar için c = r_max·sin(α) ve find_turnaround_z_left/right (mevcut)
     ile sarılabilir bölgeyi hesapla.
+
+    alphas_deg: α listesi. None ise _TURNAROUND_ALPHA_DEFAULTS kullanılır.
+                alpha_step_deg > 0 verilirse 5°-85° arasında adım adım
+                otomatik oluşturulur (varsayılan listeyi geçersiz kılar).
     """
     from .path_generator import find_turnaround_z_left, find_turnaround_z_right
 
     if alphas_deg is None:
-        alphas_deg = [10.0, 20.0, 30.0, 45.0, 55.0, 70.0, 80.0]
+        alphas_deg = (_default_alpha_range(alpha_step_deg)
+                      if alpha_step_deg > 0
+                      else list(_TURNAROUND_ALPHA_DEFAULTS))
 
     r_max = float(profile.r_mm.max())
     out = TurnaroundCandidates()
