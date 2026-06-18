@@ -1857,26 +1857,41 @@ class EntegreTasarimPaneli(QWidget):
         try:
             from .renderers import (
                 ShellRenderer, HeatmapRenderer, RibbonRenderer,
-                FiberPathRenderer, PayoutEyeRenderer,
+                FiberPathRenderer, PayoutEyeRenderer, MachineRenderer,
             )
         except ImportError:
             return
 
         self._teardown_renderers()
 
-        renderers = [
+        # Standart renderer'lar: setup(view, topology)
+        std_renderers = [
             ShellRenderer(),
             HeatmapRenderer(),
             RibbonRenderer(),
             FiberPathRenderer(),
             PayoutEyeRenderer(),
         ]
-        for r in renderers:
+        for r in std_renderers:
             try:
                 r.setup(self._gl, topology)
             except Exception:
                 pass
-        self._renderers = renderers
+
+        # MachineRenderer: ek parametreler gerektirir (carriage/mandrel items)
+        machine_r = MachineRenderer()
+        try:
+            machine_r.setup(
+                self._gl,
+                topology,
+                carriage_items=self._gl.carriage_items,
+                mandrel_items=self._gl.mandrel_items,
+                L_m=self._gl.L_m,
+            )
+        except Exception:
+            pass
+
+        self._renderers = std_renderers + [machine_r]
         self._gl._on_scene_rebuild = self._on_gl_scene_rebuild
 
     def _teardown_renderers(self) -> None:
