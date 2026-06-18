@@ -1949,14 +1949,16 @@ class EntegreTasarimPaneli(QWidget):
             self._anim_timer.start()
 
     def _apply_anim_frame(self, idx: int) -> None:
-        """Verilen indeksteki RenderFrame'i tüm renderer'lara uygula."""
+        """Verilen indeksteki RenderFrame'i tüm renderer'lara uygula.
+
+        S4.4.6: _gl._apply_mandrel_rotation / _apply_carriage_x doğrudan
+        çağrıları kaldırıldı — MachineRenderer._renderers içinde bu işi yapıyor.
+        """
         if self._builder is None:
             return
         n = self._builder.n_states
         idx = max(0, min(n - 1, idx))
         frame = self._builder.build(idx)
-        self._gl._apply_mandrel_rotation(frame.spindle_angle_deg)
-        self._gl._apply_carriage_x(frame.carriage_x_mm)
         for r in self._renderers:
             try:
                 r.update(frame)
