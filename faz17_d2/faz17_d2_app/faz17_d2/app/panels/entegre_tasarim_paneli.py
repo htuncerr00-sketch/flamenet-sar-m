@@ -1991,6 +1991,15 @@ class EntegreTasarimPaneli(QWidget):
         self._anim_playing = False
         self._builder = None
         self._anim_idx = 0
+        # S4.4.7: MachineRenderer iç durumu teardown'dan önce sıfırla.
+        # setup() auto-sync'e ek olarak açık bir güvenlik katmanı.
+        center_mm = getattr(self._gl, 'L_m', 0.3) * 1000.0 / 2.0
+        for r in self._renderers:
+            if hasattr(r, 'reset'):
+                try:
+                    r.reset(center_x_mm=center_mm)
+                except Exception:
+                    pass
         self._teardown_renderers()
         for attr in ('_btn_play', '_btn_pause', '_btn_stop_anim', '_btn_reset_anim'):
             if hasattr(self, attr):
