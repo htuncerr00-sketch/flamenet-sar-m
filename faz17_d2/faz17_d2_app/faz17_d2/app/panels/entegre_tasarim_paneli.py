@@ -518,6 +518,23 @@ class _MachineGLView(gl.GLViewWidget):
         self._L_m = 0.300
         self._rebuild_scene()
 
+    # ── S4.4.4: Read-only property'ler (MachineRenderer erişimi için) ──────────
+
+    @property
+    def carriage_items(self) -> list:
+        """Dinamik taşıyıcı GL öğeleri (salt okunur)."""
+        return self._carriage_items
+
+    @property
+    def mandrel_items(self) -> list:
+        """Dönen mandrel GL öğeleri (salt okunur)."""
+        return self._mandrel_items
+
+    @property
+    def L_m(self) -> float:
+        """Mandrel uzunluğu (metre)."""
+        return self._L_m
+
     # ── Dışarıdan çağrılan API ───────────────────────────────────────────────
 
     def update_mandrel(self, diameter_mm: float, length_mm: float,
