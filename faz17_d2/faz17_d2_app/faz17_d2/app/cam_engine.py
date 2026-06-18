@@ -1,37 +1,32 @@
 """
-app/cam_engine.py — CAM Arka Uç Cephesi (S2)
-=============================================
-Tüm backend CAM çağrılarını tek bir noktada toplar.
+app/cam_engine.py — CAM Köprüsü (Shim)
+=======================================
+Bu modül artık yalnızca ince bir köprüdür.
+Kanonik implementasyon: faz17_d1/core/cam_engine.py
 
-Kural:
-    UI (cam_panel, entegre_tasarim_paneli, …)
-        → cam_engine fonksiyonları
-            → backend.core.*
+CamRequest API'si ve tüm fonksiyon imzaları/dönüş tipleri değişmez;
+cam_panel, entegre_tasarim_paneli ve diğer UI bileşenleri kırılmaz.
 
-cam_panel doğrudan backend importu YAPMAZ; yalnızca bu modülden çağırır.
-cam_engine'nin kendisi ise lazy import kullanır (Qt uygulaması import sırasıyla
-oynamasın diye; worker thread'den de güvenle çağrılabilir).
-
-5 ana fonksiyon
----------------
-load_mandrel  : CamRequest → MandrelModel (parametrik veya STL)
-compute_path  : CamRequest + MandrelModel → (WindingPath, katman_listesi | None)
-compute_gcode : WindingPath + MachineConfig + katman_listesi → GCodeProgram
-compute_twin  : MandrelModel + CamRequest → TwinSimulationResult
-compute_coverage: WindingPath + MandrelModel → CoverageMap
+Köprü tablosu:
+    load_mandrel(req)          → core.build_mandrel_model(MandrelSpec)
+    compute_path(req, model)   → stack_dict varsa doğrudan backend;
+                                 yoksa core.compute_path(model, PathSpec)
+    compute_gcode(…)           → doğrudan backend (plan_motion + generate_gcode)
+    compute_twin(model, req)   → core.compute_twin(…).simulation
+    compute_coverage(…)        → doğrudan backend (solve_coverage)
 """
 from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 log = logging.getLogger("faz17_d2.cam_engine")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CamRequest — UI'dan backend'e geçen DÜZ veri yapısı
+# CamRequest — UI'dan backend'e geçen DÜZ veri yapısı (KORUNUYOR)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -67,68 +62,67 @@ class CamRequest:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Re-export: backend tipleri (cam_panel tek import noktası olarak cam_engine kullanır)
+# Re-export: MachineConfig (cam_panel `from app.cam_engine import MachineConfig`)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _import_gcode_config():
-    """MachineConfig + GCodeProgram lazy import (Qt app import sırasına müdahale etmez)."""
-    from backend.core.gcode_postprocessor import MachineConfig, GCodeProgram
-    return MachineConfig, GCodeProgram
-
-
-# cam_panel'in `from app.cam_engine import MachineConfig` kullanabilmesi için
-# modül yüklenince MachineConfig'i de bu isim alanına koy.
 def __getattr__(name):
     if name == "MachineConfig":
-        MachineConfig, _ = _import_gcode_config()
+        from backend.core.gcode_postprocessor import MachineConfig
         return MachineConfig
     raise AttributeError(f"module 'cam_engine' has no attribute {name!r}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Fonksiyon 1 — load_mandrel
+# İç yardımcılar — CamRequest ↔ core spec çevirisi
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_TYPE_TO_KIND: dict = {
+    "Silindir": "cylinder",
+    "Konik": "cone",
+    "Kubbeli Silindir": "dome_cylinder_dome",
+    "STL'den": "stl",
+}
+
+_STRATEGY_TR_EN: dict = {
+    "Sarmal": "helical",
+    "Çevre": "hoop",
+    "Kutupsal": "polar",
+}
+
+
+def _effective_alpha(req: CamRequest) -> float:
+    """Stratejiye göre gerçek sarma açısını hesapla."""
+    if req.strategy == "Çevre":
+        return 88.0
+    if req.strategy == "Kutupsal":
+        return min(max(req.alpha_deg, 5.0), 20.0)
+    return req.alpha_deg
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fonksiyon 1 — load_mandrel  →  core.build_mandrel_model
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def load_mandrel(req: CamRequest):
     """
-    CamRequest'ten MandrelModel oluştur.
+    CamRequest → MandrelModel.
 
-    STL seçiliyse stl_intelligence.analyze_stl() çağrılır → tam rapor + güven skoru.
-    Parametrik seçeneklerde MandrelModel.from_parametric() kullanılır.
-
-    Dönüş: MandrelModel (her zaman; never raises on bad confidence — caller karar verir)
+    core.build_mandrel_model'e delege eder; tüm geometri mantığı orada.
     """
-    from backend.core.geometry_engine import MandrelProfile
-    from backend.core.mandrel_model import MandrelModel
+    from backend.core.cam_engine import build_mandrel_model, MandrelSpec
 
-    mtype = req.mandrel_type
-    r_mm = req.diameter_mm / 2.0
-    l_mm = req.length_mm
-
-    if mtype == "STL'den":
-        if not req.stl_path:
-            raise ValueError("STL yolu belirtilmedi.")
-        log.info("[cam_engine] STL yükleniyor: %s", req.stl_path)
-        from backend.core.stl_intelligence import analyze_stl
-        report = analyze_stl(req.stl_path)
-        model = MandrelModel.from_stl(report)
-        log.info("[cam_engine] STL yüklendi: grade=%s winding_ready=%s",
-                 model.confidence.grade if model.confidence else "—",
-                 model.is_winding_ready())
-    else:
-        if mtype == "Silindir":
-            profile = MandrelProfile.cylinder(l_mm, r_mm)
-        elif mtype == "Konik":
-            r_end = r_mm + l_mm * math.tan(math.radians(req.cone_angle_deg))
-            profile = MandrelProfile.cone(l_mm, r_mm, r_end)
-        elif mtype == "Kubbeli Silindir":
-            profile = MandrelProfile.dome_cylinder_dome(l_mm, r_mm, req.dome_h_mm)
-        else:
-            raise ValueError(f"Bilinmeyen mandrel tipi: {mtype!r}")
-        model = MandrelModel.from_parametric(profile)
-        log.info("[cam_engine] Parametrik mandrel: %s r=%.1f L=%.1f",
-                 mtype, r_mm, l_mm)
-
+    kind = _TYPE_TO_KIND.get(req.mandrel_type, "cylinder")
+    spec = MandrelSpec(
+        kind=kind,
+        diameter_mm=req.diameter_mm,
+        length_mm=req.length_mm,
+        cone_angle_deg=req.cone_angle_deg,
+        dome_height_mm=req.dome_h_mm,
+        stl_path=req.stl_path,
+        analyze_stl=True,
+    )
+    model = build_mandrel_model(spec)
+    log.info("[cam_engine] load_mandrel OK: %s → %s", req.mandrel_type, model.source_type)
     return model
 
 
@@ -143,9 +137,6 @@ def compute_path(req: CamRequest, model) -> Tuple[object, Optional[List]]:
     Dönüş: (WindingPath, all_layer_paths | None)
       - all_layer_paths  : Çok-katman modunda [(layer_dict, WindingPath), …]
       - None             : Tek-açı parametrik modda
-
-    STL modeli için is_winding_ready() False ise uyarı loglanır;
-    caller UI'da kullanıcıya gösterir.
     """
     from backend.core.path_generator import (
         WindingPathParams, generate_path,
@@ -175,7 +166,7 @@ def compute_path(req: CamRequest, model) -> Tuple[object, Optional[List]]:
                 tow_width_mm=float(_layer.get("fitil_genisligi_mm", req.tow_w_mm)),
                 overlap_pct=float(_layer.get("cakisma_pct", req.overlap_pct)),
             ))
-        _ests = preflight_check_stack(_layer_params)   # ComplexityError fırlatabilir
+        _ests = preflight_check_stack(_layer_params)
         log.info("[cam_engine] preflight OK (stack %d katman): %d toplam nokta",
                  len(_ests), sum(e.points_per_layer for e in _ests))
 
@@ -210,44 +201,27 @@ def compute_path(req: CamRequest, model) -> Tuple[object, Optional[List]]:
                  len(all_layer_paths), len(first_path.points))
         return first_path, all_layer_paths
 
-    # ── Tek-açı parametrik mod ────────────────────────────────────────────────
-    strategy_map = {"Sarmal": "helical", "Çevre": "hoop", "Kutupsal": "polar"}
-    strategy = strategy_map.get(req.strategy, "helical")
+    # ── Tek-açı parametrik mod  →  core.compute_path ─────────────────────────
+    from backend.core.cam_engine import compute_path as core_compute_path, PathSpec
 
-    # Strateji'ye göre gerçek alpha
-    salpha = req.alpha_deg
-    if req.strategy == "Çevre":
-        salpha = 88.0
-    elif req.strategy == "Kutupsal":
-        salpha = min(max(req.alpha_deg, 5.0), 20.0)
+    salpha = _effective_alpha(req)
+    strategy = _STRATEGY_TR_EN.get(req.strategy, "helical")
 
-    pp_pre = WindingPathParams(
-        profile=profile,
-        alpha_deg=salpha,
-        n_layers=req.n_layers,
-        tow_width_mm=req.tow_w_mm,
-        overlap_pct=req.overlap_pct,
-    )
-    est = preflight_check(pp_pre)   # ComplexityError fırlatabilir
-    log.info("[cam_engine] preflight OK: %d devre/kat, %d nokta/kat, %.1f MB",
-             est.n_circuits_per_layer, est.points_per_layer, est.estimated_memory_mb)
-
-    path_params = WindingPathParams(
-        profile=profile,
+    spec = PathSpec(
         alpha_deg=salpha,
         n_layers=req.n_layers,
         tow_width_mm=req.tow_w_mm,
         overlap_pct=req.overlap_pct,
         feed_mm_s=req.feed_mm_s,
         spindle_rpm=req.rpm,
-        winding_strategy=strategy,
-        carriage_min_mm=req.x_min,
-        carriage_max_mm=req.x_max,
+        strategy=strategy,
+        run_preflight=True,
+        compute_coverage=False,
     )
-    path = generate_path(path_params)
+    result = core_compute_path(model, spec)
     log.info("[cam_engine] path OK (parametrik): %d nokta, %d devre",
-             len(path.points), path.n_circuits)
-    return path, None
+             len(result.winding_path.points), result.winding_path.n_circuits)
+    return result.winding_path, None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -260,8 +234,8 @@ def compute_gcode(path, config, all_layer_paths: Optional[List] = None):
 
     Parametreler
     ------------
-    path             : Ana WindingPath (tek-açı veya çok-katmanın ilk yolu)
-    config           : MachineConfig (kontrolör tipi, eksen adları, hız limitleri)
+    path             : Ana WindingPath
+    config           : MachineConfig
     all_layer_paths  : Çok-katman modunda [(layer_dict, WindingPath), …]
 
     Dönüş: GCodeProgram
@@ -270,7 +244,6 @@ def compute_gcode(path, config, all_layer_paths: Optional[List] = None):
     from backend.core.gcode_postprocessor import generate_gcode, GCodeProgram
 
     if all_layer_paths:
-        # Çok-katmanlı: her katman için ayrı G-code, sıralı birleştir
         all_lines: List[str] = []
         total_len = 0.0
         total_time = 0.0
@@ -287,11 +260,9 @@ def compute_gcode(path, config, all_layer_paths: Optional[List] = None):
             gp_layer = generate_gcode(segs, wpath, config)
 
             if i == 0:
-                # İlk katman: tam başlık + gövde (M30 hariç)
                 body = [ln for ln in gp_layer.lines if ln.strip() != "M30"]
                 all_lines.extend(body)
             else:
-                # Sonraki katmanlar: başlık/bitiş satırları atla
                 _skip = {"G21", "G90", "G28", "M30"}
                 _skip_pfx = (
                     "; Filament", "; Mandrel", "; Sarma",
@@ -310,7 +281,6 @@ def compute_gcode(path, config, all_layer_paths: Optional[List] = None):
             coverage = max(coverage, gp_layer.coverage_pct)
 
         all_lines.append("M30  ; Program sonu")
-
         combined = GCodeProgram(
             lines=all_lines,
             n_circuits=total_circuits,
@@ -323,7 +293,6 @@ def compute_gcode(path, config, all_layer_paths: Optional[List] = None):
                  len(combined.lines), combined.n_circuits)
         return combined
 
-    # Tek-açı modu
     segments = plan_motion(path)
     gp = generate_gcode(segments, path, config)
     log.info("[cam_engine] gcode OK (parametrik): %d satır, %d devre",
@@ -332,58 +301,37 @@ def compute_gcode(path, config, all_layer_paths: Optional[List] = None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Fonksiyon 4 — compute_twin
+# Fonksiyon 4 — compute_twin  →  core.compute_twin
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def compute_twin(model, req: CamRequest):
     """
     Digital twin simülasyonu.
 
-    Dönüş: TwinSimulationResult
-    Her TwinState.spindle_angle_deg, .carriage_x_actual_mm, .eye_x_mm,
-    .eye_r_mm, .current_radius_mm, .fiber_deposited_mm ile S3 animasyonu besler.
+    core.compute_twin'e delege eder; TwinResult.simulation sarılır.
+    Dönüş: TwinSimulationResult (eski sözleşme korunur).
     """
-    from backend.core.winding_twin import simulate_winding
-    from backend.core.fiber_band import FiberBand
-    from backend.core.path_generator import WindingPathParams
+    from backend.core.cam_engine import compute_twin as core_twin, PathSpec, TwinSpec
 
-    profile = model.as_profile()
+    salpha = _effective_alpha(req)
+    strategy = _STRATEGY_TR_EN.get(req.strategy, "helical")
 
-    strategy_map = {"Sarmal": "helical", "Çevre": "hoop", "Kutupsal": "polar"}
-    strategy = strategy_map.get(req.strategy, "helical")
-
-    salpha = req.alpha_deg
-    if req.strategy == "Çevre":
-        salpha = 88.0
-    elif req.strategy == "Kutupsal":
-        salpha = min(max(req.alpha_deg, 5.0), 20.0)
-
-    base_params = WindingPathParams(
-        profile=profile,
+    path_spec = PathSpec(
         alpha_deg=salpha,
         n_layers=req.n_layers,
         tow_width_mm=req.tow_w_mm,
         overlap_pct=req.overlap_pct,
         feed_mm_s=req.feed_mm_s,
         spindle_rpm=req.rpm,
-        winding_strategy=strategy,
-        carriage_min_mm=req.x_min,
-        carriage_max_mm=req.x_max,
+        strategy=strategy,
+        compute_coverage=False,
     )
-    band = FiberBand(tow_width_mm=req.tow_w_mm)
+    twin_spec = TwinSpec(n_layers=req.n_layers, dt_s=req.twin_dt_s)
 
-    log.info("[cam_engine] compute_twin başlıyor: %d katman, dt=%.1fs",
-             req.n_layers, req.twin_dt_s)
-    result = simulate_winding(
-        base_profile=profile,
-        band=band,
-        base_params=base_params,
-        n_layers=req.n_layers,
-        dt_s=req.twin_dt_s,
-    )
+    result = core_twin(model, path_spec, twin_spec)
     log.info("[cam_engine] compute_twin OK: %d durum, süre=%.1fs",
              len(result.states), result.total_time_s)
-    return result
+    return result.simulation  # TwinResult → TwinSimulationResult (eski sözleşme)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
