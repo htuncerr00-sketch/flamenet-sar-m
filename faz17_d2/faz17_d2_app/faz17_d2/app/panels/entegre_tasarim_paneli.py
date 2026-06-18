@@ -2032,11 +2032,13 @@ class EntegreTasarimPaneli(QWidget):
             self._anim_timer.stop()
             return
         # LOD tick → FPS ölçümü + seviye değişikliği kontrolü
+        # S4.5.1: level_changed sonrası 'return' KALDIRILDI —
+        #         rebuild tamamlandıktan sonra bu kare normal işlenir.
         if hasattr(self, '_lod') and self._lod is not None:
             self._lod.tick()
             if self._lod.level_changed:
                 self._rebuild_topology()
-                return
+                # _rebuild_topology() builder/renderer'ı yeniledi; devam et.
         n = self._builder.n_states
         try:
             speed = int(
