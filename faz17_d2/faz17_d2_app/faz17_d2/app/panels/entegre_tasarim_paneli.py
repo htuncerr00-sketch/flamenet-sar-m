@@ -2032,6 +2032,15 @@ class EntegreTasarimPaneli(QWidget):
     def _on_anim_reset(self) -> None:
         self._anim_timer.stop()
         self._anim_playing = False
+        # S4.6.3: play→reset→play'de eski trail ve görsel state taşınmaz.
+        #         FiberPathRenderer.reset() iz listesini; Ribbon/ShellRenderer.reset()
+        #         GL öğelerini gizler.
+        for r in self._renderers:
+            if hasattr(r, 'reset'):
+                try:
+                    r.reset()
+                except Exception:
+                    pass
         self._anim_idx = 0
         if self._builder is not None:
             self._apply_anim_frame(0)
