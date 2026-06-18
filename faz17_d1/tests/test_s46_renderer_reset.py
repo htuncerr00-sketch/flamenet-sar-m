@@ -182,8 +182,51 @@ class TestRibbonReset:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# S4.6.2 — ShellRenderer.reset() — S4.6.2 commit'inde eklenecek
+# S4.6.2 — ShellRenderer.reset()
 # ─────────────────────────────────────────────────────────────────────────────
+
+class TestShellReset:
+
+    def _make_renderer(self) -> tuple[ShellRenderer, _MockView, _MockGLMeshItem]:
+        r   = ShellRenderer()
+        v   = _MockView()
+        top = _MockTopology()
+        r.setup(v, top)
+        return r, v, r._item  # type: ignore[attr-defined]
+
+    def test_sr01_reset_hides_item(self):
+        """SR-01: reset() sonrası item görünmez."""
+        r, _, item = self._make_renderer()
+        r.update(_MockShellFrame())
+        assert item._visible is True
+        r.reset()
+        assert item._visible is False
+
+    def test_sr02_reset_without_setup_noop(self):
+        """SR-02: setup yapılmadan reset() hata vermez."""
+        r = ShellRenderer()
+        r.reset()
+
+    def test_sr03_reset_after_update_hides(self):
+        """SR-03: Update sonrası reset gizler."""
+        r, _, item = self._make_renderer()
+        r.update(_MockShellFrame())
+        r.reset()
+        assert item._visible is False
+
+    def test_sr04_reset_has_method(self):
+        """SR-04: ShellRenderer sınıfı reset() metoduna sahip."""
+        assert hasattr(ShellRenderer, 'reset')
+        assert callable(getattr(ShellRenderer(), 'reset'))
+
+    def test_sr05_reset_then_update_restores(self):
+        """SR-05: reset() sonrası update() frame görünürse tekrar görünür yapar."""
+        r, _, item = self._make_renderer()
+        r.reset()
+        assert item._visible is False
+        r.update(_MockShellFrame())   # is_shell_visible=True → görünür olmalı
+        assert item._visible is True
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # S4.6.3 — _on_anim_reset() renderer döngüsü simülasyonu

@@ -74,6 +74,14 @@ class ShellRenderer:
         self._item = None
         self._ready = False
 
+    def reset(self) -> None:
+        """Animasyon sıfırlandığında kabuğu gizle ve başlangıç durumuna döndür."""
+        if self._item is not None:
+            try:
+                self._item.setVisible(False)
+            except Exception:
+                pass
+
     # ── Güncelleme ───────────────────────────────────────────────────────────
 
     def update(self, frame) -> None:
