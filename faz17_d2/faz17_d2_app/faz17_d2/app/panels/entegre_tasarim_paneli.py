@@ -506,15 +506,12 @@ class _MachineGLView(gl.GLViewWidget):
         self._frame_items:     list = []   # statik: raylar, headstock, tailstock, zemin
         self._carriage_items:  list = []   # dinamik: X boyunca hareket eder
         self._fiber_items:     list = []   # hesap sonrası statik fiber yolları
-        self._anim_fiber_item       = None  # (S4 öncesi) ince çizgi — artık kullanılmıyor
-        self._ribbon_item           = None  # S4: fiziksel genişlikli tow ribbon (GLMeshItem)
-        self._eye_item              = None  # S3: payout gözü işaretçisi (scatter)
-        self._delivery_item         = None  # S3: gözden temas noktasına teslim fiberi
-        self._shell_item            = None  # S3: birikmiş fiber kabuğu (katman büyümesi)
-        self._heatmap_item          = None  # S5: kaplama ısı haritası
-        self._shell_last_r_m: float = 0.0
+        self._anim_fiber_item       = None  # ince çizgi yedek (renderer yoksa)
+        # S4.3: eski tek-nesne renderer değişkenleri KALDIRILDI →
+        #       ShellRenderer / HeatmapRenderer / RibbonRenderer / PayoutEyeRenderer
         self._anim_mandrel_angle: float = 0.0
         self._carriage_x_m:  float = 0.0
+        self._on_scene_rebuild = None  # callable() — renderer teardown hook
 
         # Başlangıç sahnesi
         self._R_m = 0.050
@@ -584,6 +581,10 @@ class _MachineGLView(gl.GLViewWidget):
         R = self._R_m
         L = self._L_m
 
+        # S4.3: Renderer'ları teardown et (panel callback)
+        if callable(self._on_scene_rebuild):
+            self._on_scene_rebuild()
+
         # Eski tüm nesneleri kaldır
         for item in (self._mandrel_items + self._frame_items
                      + self._carriage_items):
@@ -591,14 +592,11 @@ class _MachineGLView(gl.GLViewWidget):
         self._mandrel_items.clear()
         self._frame_items.clear()
         self._carriage_items.clear()
-        for attr in ('_anim_fiber_item', '_ribbon_item', '_eye_item',
-                     '_delivery_item', '_shell_item', '_heatmap_item'):
-            item = getattr(self, attr, None)
-            if item is not None:
-                self.removeItem(item)
-                setattr(self, attr, None)
+        item = getattr(self, '_anim_fiber_item', None)
+        if item is not None:
+            self.removeItem(item)
+            self._anim_fiber_item = None
         self._anim_mandrel_angle = 0.0
-        self._shell_last_r_m = 0.0
         self._carriage_x_m = L / 2.0
 
         # Mandrel — yarı saydam silindir
@@ -638,25 +636,10 @@ class _MachineGLView(gl.GLViewWidget):
 
         self._fit_camera(R, L)
 
-    # ── 4-eksen simülasyon API ────────────────────────────────────────────────
+    # ── S4.3: Renderer koordinasyon API ──────────────────────────────────────
 
-    def set_simulation_state(self, a_deg: float, x_mm: float,
-                              pts_3d, *, eye_xyz=None,
-                              surface_r_mm: Optional[float] = None,
-                              ribbon_left=None, ribbon_right=None) -> None:
-        """4-eksen + payout TwinState güncellemesi.
-
-        Parametreler
-        ------------
-        a_deg        : İş mili kümülatif açısı (spindle_angle_deg)
-        x_mm         : Gerçek taşıyıcı eksenel konumu (carriage_x_actual_mm)
-        pts_3d       : Büyüyen temas noktası şeridi — dünya koordinatları (N,3)
-        eye_xyz      : Payout gözünün dünya konumu (3,)  [S3]
-        surface_r_mm : O anki yüzey yarıçapı (katman büyümesi)  [S3/S6 köprüsü]
-        ribbon_left  : Tow ribbon sol kenar dünya koordinatları (N,3)  [S4]
-        ribbon_right : Tow ribbon sağ kenar dünya koordinatları (N,3)  [S4]
-        """
-        # 1. Mandrel dönüşü (X ekseni etrafında kümülatif)
+    def _apply_mandrel_rotation(self, a_deg: float) -> None:
+        """İş mili kümülatif açısını mandrel GL transform'una uygula."""
         delta = a_deg - self._anim_mandrel_angle
         if abs(delta) > 0.05:
             for item in self._mandrel_items:
@@ -664,7 +647,8 @@ class _MachineGLView(gl.GLViewWidget):
                 item.rotate(a_deg, 1, 0, 0, local=False)
             self._anim_mandrel_angle = a_deg
 
-        # 2. Taşıyıcı X hareketi (TwinState gerçek konumu)
+    def _apply_carriage_x(self, x_mm: float) -> None:
+        """Taşıyıcıyı verilen eksenel konuma (mm) kaydır."""
         x_m = float(np.clip(x_mm / 1000.0, 0.0, self._L_m))
         dx = x_m - self._carriage_x_m
         if abs(dx) > 1e-5:
@@ -672,131 +656,15 @@ class _MachineGLView(gl.GLViewWidget):
                 item.translate(dx, 0, 0)
             self._carriage_x_m = x_m
 
-        # 3. S4: Yatırılan fiber — fiziksel genişlikli tow ribbon (mesh strip)
-        if ribbon_left is not None and ribbon_right is not None \
-                and len(ribbon_left) >= 2:
-            self._update_ribbon(ribbon_left, ribbon_right)
-        elif pts_3d is not None and len(pts_3d) >= 2:
-            # Ribbon verisi yoksa ince çizgiye düş (geri uyum)
-            if self._anim_fiber_item is None:
-                self._anim_fiber_item = gl.GLLinePlotItem(
-                    pos=pts_3d, color=(1.0, 1.0, 0.15, 0.95),
-                    width=3.5, antialias=True, mode='line_strip')
-                self.addItem(self._anim_fiber_item)
-            else:
-                self._anim_fiber_item.setData(pos=pts_3d)
-
-        # 4. Temas noktası (nozul ucu)
-        contact = None
-        if pts_3d is not None and len(pts_3d) >= 1:
-            contact = np.asarray(pts_3d[-1], dtype=np.float32)
-            self.set_head_position(contact)
-
-        # 5. S3: Payout gözü işaretçisi + teslim fiberi (gözden temasa)
-        if eye_xyz is not None:
-            eye = np.asarray(eye_xyz, dtype=np.float32).reshape(3)
-            if self._eye_item is None:
-                self._eye_item = gl.GLScatterPlotItem(
-                    pos=eye.reshape(1, 3), size=14,
-                    color=(0.2, 1.0, 1.0, 1.0), pxMode=True)
-                self.addItem(self._eye_item)
-            else:
-                self._eye_item.setData(pos=eye.reshape(1, 3))
-            # Teslim fiberi: göz → temas noktası
-            if contact is not None:
-                seg = np.vstack([eye, contact]).astype(np.float32)
-                if self._delivery_item is None:
-                    self._delivery_item = gl.GLLinePlotItem(
-                        pos=seg, color=(0.2, 1.0, 1.0, 0.85),
-                        width=2.0, antialias=True, mode='line_strip')
-                    self.addItem(self._delivery_item)
-                else:
-                    self._delivery_item.setData(pos=seg)
-
-        # 6. S3: Katman büyümesi — fiber kabuk güncelle
-        if surface_r_mm is not None:
-            r_m = float(surface_r_mm) / 1000.0
-            if r_m > self._R_m + 2e-4 and abs(r_m - self._shell_last_r_m) > 5e-5:
-                self._update_fiber_shell(r_m)
-                self._shell_last_r_m = r_m
-
-    def _update_ribbon(self, left, right) -> None:
-        """S4: Tow ribbon'u mesh strip olarak kur/güncelle.
-
-        left/right: (m,3) dünya koordinatları (metre) — bant kenarları.
-        Köşeler [L0,R0,L1,R1,…] sırasıyla örülür; her quad iki üçgene bölünür.
-        """
-        L = np.asarray(left, dtype=np.float32)
-        R = np.asarray(right, dtype=np.float32)
-        m = min(len(L), len(R))
-        if m < 2:
-            return
-        L = L[:m]; R = R[:m]
-
-        # Köşeler: 2m adet, [L0,R0,L1,R1,…]
-        verts = np.empty((2 * m, 3), dtype=np.float32)
-        verts[0::2] = L
-        verts[1::2] = R
-
-        # Yüzler: her ardışık çift için 2 üçgen
-        i = np.arange(m - 1, dtype=np.int32)
-        base = (2 * i).reshape(-1, 1)
-        tri1 = np.column_stack([base[:, 0], base[:, 0] + 1, base[:, 0] + 3])
-        tri2 = np.column_stack([base[:, 0], base[:, 0] + 3, base[:, 0] + 2])
-        faces = np.empty((2 * (m - 1), 3), dtype=np.int32)
-        faces[0::2] = tri1
-        faces[1::2] = tri2
-
-        if self._ribbon_item is None:
-            self._ribbon_item = gl.GLMeshItem(
-                vertexes=verts, faces=faces,
-                color=(1.0, 0.82, 0.15, 0.92),
-                smooth=False, drawEdges=False,
-                glOptions='translucent', shader='shaded')
-            self.addItem(self._ribbon_item)
-        else:
-            self._ribbon_item.setMeshData(vertexes=verts, faces=faces)
-
-    def _update_fiber_shell(self, r_m: float) -> None:
-        """S3: Birikmiş fiber tabakasını şeffaf silindir kabuğu olarak göster/güncelle."""
-        md = _cyl_mesh_data(0.0, self._L_m, r_m, n=48)
-        if self._shell_item is None:
-            self._shell_item = gl.GLMeshItem(
-                meshdata=md,
-                color=(1.0, 0.78, 0.18, 0.38),
-                smooth=True, drawEdges=False,
-                glOptions='translucent')
-            self.addItem(self._shell_item)
-        else:
-            self._shell_item.setMeshData(meshdata=md)
-
-    def set_coverage_map(self, coverage, profile) -> None:
-        """S5: Kaplama haritasını mandrel yüzeyinde renkli mesh olarak göster."""
-        if self._heatmap_item is not None:
-            self.removeItem(self._heatmap_item)
-            self._heatmap_item = None
-        if coverage is None or profile is None:
-            return
-        item = _coverage_mesh(coverage, profile)
-        if item is not None:
-            self._heatmap_item = item
-            self.addItem(self._heatmap_item)
-
     def clear_simulation_state(self) -> None:
-        """Simülasyonu sıfırla: büyüyen fiberi kaldır, mandrel + taşıyıcıyı dinlenme konumuna döndür."""
-        for attr in ('_anim_fiber_item', '_ribbon_item', '_eye_item',
-                     '_delivery_item'):
-            item = getattr(self, attr, None)
-            if item is not None:
-                self.removeItem(item)
-                setattr(self, attr, None)
-        if self._shell_item is not None:
-            self.removeItem(self._shell_item)
-            self._shell_item = None
-        self._shell_last_r_m = 0.0
-        if self._heatmap_item is not None:
-            self.removeItem(self._heatmap_item)
-            self._heatmap_item = None
+        """Simülasyonu sıfırla: renderer teardown + mandrel/taşıyıcı dinlenme konumu."""
+        # S4.3: renderer teardown panel callback'e devredildi
+        if callable(self._on_scene_rebuild):
+            self._on_scene_rebuild()
+        item = getattr(self, '_anim_fiber_item', None)
+        if item is not None:
+            self.removeItem(item)
+            self._anim_fiber_item = None
         for item in self._mandrel_items:
             item.resetTransform()
         self._anim_mandrel_angle = 0.0
@@ -974,7 +842,7 @@ class EntegreTasarimPaneli(QWidget):
         self._worker_ref = None
         self._backend = _try_backend()
         self._backend_ok = self._backend[0] is not None
-        self._twin_backend = _try_twin_backend()      # S3: (simulate_winding, FiberBand)
+        self._twin_backend = _try_twin_backend()      # (simulate_winding, FiberBand)
         # Proje yükleme sırasında tasarimDegisti fırlatılmasın
         self._suppress_dirty = False
         # Merkezi undo/redo yığını (MainWindow kurar; yoksa komutlar
@@ -982,20 +850,21 @@ class EntegreTasarimPaneli(QWidget):
         self._undo_stack = None
         self._build_ui()
         self._init_param_tracking()
-        # Animasyon durumu (S3: TwinState tabanlı — naif cos/sin projeksiyonu kaldırıldı)
+        # S4.3: RenderFrame tabanlı animasyon mimarisi
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(33)  # ~30 FPS
         self._anim_timer.timeout.connect(self._anim_tick)
-        self._anim_xyz:   object = None  # (N,3) f32 — temas noktası dünya koordinatları
-        self._anim_a_deg: object = None  # (N,)  f32 — spindle_angle_deg
-        self._anim_x_mm:  object = None  # (N,)  f32 — carriage_x_actual_mm
-        self._anim_eye:   object = None  # (N,3) f32 — payout gözü dünya koordinatları
-        self._anim_r_mm:  object = None  # (N,)  f32 — current_radius_mm (katman büyümesi)
-        self._anim_rib_L: object = None  # (N,3) f32 — S4 tow ribbon sol kenar
-        self._anim_rib_R: object = None  # (N,3) f32 — S4 tow ribbon sağ kenar
-        self._anim_tow_w_mm: float = 6.0  # S4 ribbon genişliği (mm)
         self._anim_idx: int = 0
         self._anim_playing: bool = False
+        self._anim_tow_w_mm: float = 6.0
+        # RenderFrame pipeline bileşenleri
+        self._builder    = None  # RenderFrameBuilder | None
+        self._topology   = None  # RenderSceneTopology | None
+        self._renderers: list = []
+        self._twin_ref   = None  # TwinSimulationResult — LOD rebuild için
+        self._profile_ref = None
+        self._last_coverage = None
+        self._lod        = None  # AdaptiveLODManager | None
 
     # ── UI inşası ─────────────────────────────────────────────────────────────
 
@@ -1400,6 +1269,8 @@ class EntegreTasarimPaneli(QWidget):
         l  = self._sp_len.value()
         t  = self._cb_type.currentText()
         dh = self._sp_dome.value()
+        # S4.3: sahne yeniden oluşturulmadan önce renderer'ları teardown et
+        self._teardown_renderers()
         self._gl.update_mandrel(d, l, t, dh)
         self._gl.clear_fiber_paths()
         self._btn_gcode.setEnabled(False)
@@ -1883,11 +1754,9 @@ class EntegreTasarimPaneli(QWidget):
         # 3D fiber yollarını güncelle
         self._gl.update_fiber_paths(profile, path)
         self._btn_gcode.setEnabled(True)
-        # S3: TwinState tabanlı animasyon kur (twin None ise nazikçe devre dışı)
-        self._setup_animation(twin, profile)
-        # S5: Kaplama ısı haritasını göster (coverage hesaplandıysa)
-        if coverage is not None:
-            self._gl.set_coverage_map(coverage, profile)
+        # S4.3: RenderFrameBuilder tabanlı animasyon kur
+        tow_w = float(getattr(self, '_anim_tow_w_mm', 6.0))
+        self._setup_builder(twin, profile, tow_w, coverage=coverage)
 
     @Slot(str, int)
     def _on_calc_error(self, msg: str, gen: int) -> None:
@@ -1899,148 +1768,174 @@ class EntegreTasarimPaneli(QWidget):
         self._status_lbl.setText(f"Hata: {msg[:120]}")
         QMessageBox.warning(self, "Hesaplama Hatası", msg)
 
-    # ── Animasyon yönetimi ────────────────────────────────────────────────────
+    # ── S4.3: RenderFrame tabanlı animasyon yönetimi ─────────────────────────
 
-    def _setup_animation(self, twin, profile) -> None:
-        """S3: Digital twin sonucundan animasyon dizilerini hazırla.
+    def _setup_builder(self, twin, profile, tow_width_mm: float,
+                       coverage=None) -> None:
+        """RenderFrameBuilder ve renderer sınıflarını kur.
 
-        Naif cos/sin projeksiyonu KALDIRILDI. Tüm hareket alanları
-        TwinState'ten gelir:
-          spindle_angle_deg     → mandrel dönüşü
-          carriage_x_actual_mm  → taşıyıcı (dinamik gecikmeli) konum
-          current_radius_mm     → temas yarıçapı (katman büyümesi dahil)
-          eye_x_mm / eye_r_mm   → payout gözü konumu
-        Temas noktası ve göz, dünya koordinatlarına (metre) projekte edilir.
+        twin     : TwinSimulationResult | None
+        profile  : MandrelProfile
+        coverage : CoverageMap | None — heatmap verisi
         """
         self._stop_anim()
         if twin is None or not getattr(twin, 'states', None):
             self._anim_lbl.setText("Animasyon yok (twin hesaplanamadı).")
             return
         try:
-            states = twin.states
-            z0 = float(np.asarray(profile.z_mm, dtype=np.float64)[0])
-
-            step = max(1, len(states) // 3000)
-            sub = states[::step]
-            n = len(sub)
-            if n == 0:
+            from backend.core.render_frame_builder import RenderFrameBuilder
+            from backend.core.lod_manager import AdaptiveLODManager
+        except ImportError:
+            try:
+                from faz17_d1.core.render_frame_builder import RenderFrameBuilder
+                from faz17_d1.core.lod_manager import AdaptiveLODManager
+            except ImportError:
+                self._anim_lbl.setText("Animasyon yok (RenderFrameBuilder bulunamadı).")
                 return
+        try:
+            from .renderers import (
+                ShellRenderer, HeatmapRenderer, RibbonRenderer,
+                FiberPathRenderer, PayoutEyeRenderer,
+            )
+        except ImportError:
+            self._anim_lbl.setText("Animasyon yok (renderer modülleri bulunamadı).")
+            return
 
-            a_deg = np.array([s.spindle_angle_deg for s in sub], dtype=np.float64)
-            x_act = np.array([s.carriage_x_actual_mm for s in sub], dtype=np.float64)
-            r_now = np.array([s.current_radius_mm for s in sub], dtype=np.float64)
-            eye_x = np.array([s.eye_x_mm for s in sub], dtype=np.float64)
-            eye_r = np.array([s.eye_r_mm for s in sub], dtype=np.float64)
+        try:
+            self._twin_ref = twin
+            self._profile_ref = profile
+            self._last_coverage = coverage
+            self._anim_tow_w_mm = float(tow_width_mm)
 
-            a_rad = np.radians(a_deg)
-            cos_a = np.cos(a_rad)
-            sin_a = np.sin(a_rad)
+            if not hasattr(self, '_lod') or self._lod is None:
+                self._lod = AdaptiveLODManager()
 
-            # Temas noktası dünya koordinatları (eksen = X, mandrel x∈[0,L_m])
-            cx = (x_act - z0) / 1000.0
-            cy = (r_now / 1000.0) * cos_a
-            cz = (r_now / 1000.0) * sin_a
-            contact_xyz = np.column_stack([cx, cy, cz]).astype(np.float32)
+            lod = self._lod.current
+            self._topology = RenderFrameBuilder.build_topology(
+                profile,
+                shell_nz=lod.shell_nz, shell_nth=lod.shell_nth,
+                heatmap_nz=lod.heatmap_nz, heatmap_nth=lod.heatmap_nth,
+                ribbon_max_seg=lod.ribbon_max_seg,
+            )
+            dep = coverage if coverage is not None else getattr(twin, 'final_deposition', None)
+            self._builder = RenderFrameBuilder(
+                twin, profile, self._topology,
+                tow_width_mm=float(tow_width_mm),
+                deposition=dep,
+            )
+            self._setup_renderers(self._topology)
 
-            # Payout gözü dünya koordinatları (aynı açı, dışarıda — standoff)
-            ex = (eye_x - z0) / 1000.0
-            ey = (eye_r / 1000.0) * cos_a
-            ez = (eye_r / 1000.0) * sin_a
-            eye_xyz = np.column_stack([ex, ey, ez]).astype(np.float32)
-
-            self._anim_xyz   = contact_xyz
-            self._anim_a_deg = a_deg.astype(np.float32)
-            self._anim_x_mm  = x_act.astype(np.float32)
-            self._anim_eye   = eye_xyz
-            self._anim_r_mm  = r_now.astype(np.float32)
-
-            # S4: Tow ribbon kenarlarını önceden hesapla (fiziksel genişlik)
-            self._anim_rib_L, self._anim_rib_R = self._compute_ribbon_edges(
-                contact_xyz, a_deg, x_act, profile)
-
-            self._anim_idx   = 0
-
+            self._anim_idx = 0
             self._btn_play.setEnabled(True)
             self._btn_stop_anim.setEnabled(True)
             self._btn_reset_anim.setEnabled(True)
             self._anim_slider.setEnabled(True)
             self._anim_slider.setValue(0)
-            # İlk durumu göster
             self._apply_anim_frame(0)
-        except Exception:
-            self._anim_lbl.setText("Animasyon hazırlanamadı.")
+        except Exception as exc:
+            self._anim_lbl.setText(f"Animasyon hazırlanamadı: {exc}")
 
-    def _compute_ribbon_edges(self, contact_xyz, a_deg, x_act, profile):
-        """S4: Her temas noktası için tow ribbon sol/sağ kenarlarını hesapla.
-
-        Kenar = merkez ± (w/2)·ŵ,  ŵ = normalize(N × t)
-          N : yüzey dış normali (fiber_contact_model._surface_normal_unit,
-              panel eksen-X çerçevesine remap)
-          t : merkez çizgisi tanjantı (dünya koordinatları, komşu fark)
-        Genişlik fizikseldir (metre), piksel değil.
-        """
+    def _setup_renderers(self, topology) -> None:
+        """Renderer sınıflarını teardown + yeniden setup yap."""
         try:
-            from backend.core.fiber_contact_model import _surface_normal_unit
-        except Exception:
+            from .renderers import (
+                ShellRenderer, HeatmapRenderer, RibbonRenderer,
+                FiberPathRenderer, PayoutEyeRenderer,
+            )
+        except ImportError:
+            return
+
+        self._teardown_renderers()
+
+        renderers = [
+            ShellRenderer(),
+            HeatmapRenderer(),
+            RibbonRenderer(),
+            FiberPathRenderer(),
+            PayoutEyeRenderer(),
+        ]
+        for r in renderers:
             try:
-                from faz17_d1.core.fiber_contact_model import _surface_normal_unit
+                r.setup(self._gl, topology)
             except Exception:
-                return None, None
+                pass
+        self._renderers = renderers
+        self._gl._on_scene_rebuild = self._on_gl_scene_rebuild
 
-        n = len(contact_xyz)
-        if n < 2:
-            return None, None
+    def _teardown_renderers(self) -> None:
+        """Tüm renderer'ları GL sahneden kaldır."""
+        for r in self._renderers:
+            try:
+                r.teardown()
+            except Exception:
+                pass
+        self._renderers.clear()
+        self._gl._on_scene_rebuild = None
 
-        P = np.asarray(contact_xyz, dtype=np.float64)
+    def _on_gl_scene_rebuild(self) -> None:
+        """_MachineGLView._rebuild_scene() tetiklediğinde renderer'ları teardown."""
+        for r in self._renderers:
+            try:
+                r.teardown()
+            except Exception:
+                pass
+        self._renderers.clear()
 
-        # Merkez çizgisi tanjantı (ileri fark; son nokta geri fark)
-        t = np.empty_like(P)
-        t[:-1] = P[1:] - P[:-1]
-        t[-1] = P[-1] - P[-2]
-        tn = np.linalg.norm(t, axis=1, keepdims=True)
-        t = t / np.maximum(tn, 1e-12)
-
-        # Yüzey normali (panel eksen-X çerçevesi): model (Xr,Yr,Zax)→panel (Zax,Xr,Yr)
-        a_rad = np.radians(a_deg)
-        N = np.empty((n, 3), dtype=np.float64)
-        for i in range(n):
-            nm = _surface_normal_unit(profile, float(x_act[i]), float(a_rad[i]))
-            N[i, 0] = nm[2]    # eksenel → panel X
-            N[i, 1] = nm[0]    # radyal x → panel Y
-            N[i, 2] = nm[1]    # radyal y → panel Z
-
-        # Yüzey içi dik yön ŵ = N × t (normalize)
-        w = np.cross(N, t)
-        wn = np.linalg.norm(w, axis=1, keepdims=True)
-        w = w / np.maximum(wn, 1e-12)
-
-        half_w_m = (self._anim_tow_w_mm * 0.5) / 1000.0
-        left = (P + half_w_m * w).astype(np.float32)
-        right = (P - half_w_m * w).astype(np.float32)
-        return left, right
+    def _rebuild_topology(self) -> None:
+        """LOD değişiminde topology + builder + renderer'ları yeniden oluştur."""
+        if self._twin_ref is None or self._profile_ref is None:
+            return
+        was_playing = self._anim_playing
+        if was_playing:
+            self._anim_timer.stop()
+        try:
+            from backend.core.render_frame_builder import RenderFrameBuilder
+        except ImportError:
+            try:
+                from faz17_d1.core.render_frame_builder import RenderFrameBuilder
+            except ImportError:
+                return
+        try:
+            lod = self._lod.current
+            self._topology = RenderFrameBuilder.build_topology(
+                self._profile_ref,
+                shell_nz=lod.shell_nz, shell_nth=lod.shell_nth,
+                heatmap_nz=lod.heatmap_nz, heatmap_nth=lod.heatmap_nth,
+                ribbon_max_seg=lod.ribbon_max_seg,
+            )
+            dep = self._last_coverage or getattr(self._twin_ref, 'final_deposition', None)
+            self._builder = RenderFrameBuilder(
+                self._twin_ref, self._profile_ref, self._topology,
+                tow_width_mm=self._anim_tow_w_mm,
+                deposition=dep,
+            )
+            self._setup_renderers(self._topology)
+            self._apply_anim_frame(self._anim_idx)
+        except Exception:
+            pass
+        if was_playing:
+            self._anim_timer.start()
 
     def _apply_anim_frame(self, idx: int) -> None:
-        """Verilen indeksteki TwinState karesini 3D sahneye uygula."""
-        if self._anim_xyz is None:
+        """Verilen indeksteki RenderFrame'i tüm renderer'lara uygula."""
+        if self._builder is None:
             return
-        n = len(self._anim_xyz)
+        n = self._builder.n_states
         idx = max(0, min(n - 1, idx))
-        a_deg = float(self._anim_a_deg[idx])
-        x_mm  = float(self._anim_x_mm[idx])
-        r_mm  = float(self._anim_r_mm[idx]) if self._anim_r_mm is not None else None
-        pts   = self._anim_xyz[:idx + 1]
-        eye   = self._anim_eye[idx] if self._anim_eye is not None else None
-        rib_L = self._anim_rib_L[:idx + 1] if self._anim_rib_L is not None else None
-        rib_R = self._anim_rib_R[:idx + 1] if self._anim_rib_R is not None else None
-        self._gl.set_simulation_state(a_deg, x_mm, pts,
-                                      eye_xyz=eye, surface_r_mm=r_mm,
-                                      ribbon_left=rib_L, ribbon_right=rib_R)
+        frame = self._builder.build(idx)
+        self._gl._apply_mandrel_rotation(frame.spindle_angle_deg)
+        self._gl._apply_carriage_x(frame.carriage_x_mm)
+        for r in self._renderers:
+            try:
+                r.update(frame)
+            except Exception:
+                pass
         self._anim_lbl.setText(
-            f"X: {x_mm:.1f} mm  |  A: {a_deg:.0f}°  |  "
-            f"r: {r_mm:.1f} mm  |  {idx}/{n-1}")
+            f"X: {frame.carriage_x_mm:.1f} mm  |  A: {frame.spindle_angle_deg:.0f}°  |  "
+            f"r: {frame.current_radius_mm:.1f} mm  |  {idx}/{n-1}")
 
     def _on_anim_play(self) -> None:
-        if self._anim_xyz is None:
+        if self._builder is None:
             return
         self._anim_playing = True
         self._btn_pause.setEnabled(True)
@@ -2060,14 +1955,9 @@ class EntegreTasarimPaneli(QWidget):
     def _stop_anim(self) -> None:
         self._anim_timer.stop()
         self._anim_playing = False
-        self._anim_xyz   = None
-        self._anim_a_deg = None
-        self._anim_x_mm  = None
-        self._anim_eye   = None
-        self._anim_r_mm  = None
-        self._anim_rib_L = None
-        self._anim_rib_R = None
-        self._anim_idx   = 0
+        self._builder = None
+        self._anim_idx = 0
+        self._teardown_renderers()
         for attr in ('_btn_play', '_btn_pause', '_btn_stop_anim', '_btn_reset_anim'):
             if hasattr(self, attr):
                 getattr(self, attr).setEnabled(False)
@@ -2083,22 +1973,28 @@ class EntegreTasarimPaneli(QWidget):
         self._anim_timer.stop()
         self._anim_playing = False
         self._anim_idx = 0
-        if self._anim_xyz is not None:
+        if self._builder is not None:
             self._apply_anim_frame(0)
         self._anim_slider.setValue(0)
 
     def _on_anim_seek(self, value: int) -> None:
-        if self._anim_xyz is None:
+        if self._builder is None:
             return
-        n = len(self._anim_xyz)
+        n = self._builder.n_states
         self._anim_idx = max(0, min(n - 1, int(value / 1000.0 * (n - 1))))
         self._apply_anim_frame(self._anim_idx)
 
     def _anim_tick(self) -> None:
-        if self._anim_xyz is None:
+        if self._builder is None:
             self._anim_timer.stop()
             return
-        n = len(self._anim_xyz)
+        # LOD tick → FPS ölçümü + seviye değişikliği kontrolü
+        if hasattr(self, '_lod') and self._lod is not None:
+            self._lod.tick()
+            if self._lod.level_changed:
+                self._rebuild_topology()
+                return
+        n = self._builder.n_states
         try:
             speed = int(
                 self._cb_speed.currentText().replace("×", "").replace("x", ""))
