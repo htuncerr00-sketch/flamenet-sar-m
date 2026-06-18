@@ -1998,6 +1998,14 @@ class EntegreTasarimPaneli(QWidget):
     def _stop_anim(self) -> None:
         self._anim_timer.stop()
         self._anim_playing = False
+        # S4.5.3: LOD geçmiş FPS verisi temizlenir; play→stop→play'de
+        #         önceki oturumun yüksek/düşük FPS'i yeni oturumu etkilemez.
+        lod = getattr(self, '_lod', None)
+        if lod is not None:
+            try:
+                lod.reset()
+            except Exception:
+                pass
         self._builder = None
         self._anim_idx = 0
         # S4.4.7: MachineRenderer iç durumu teardown'dan önce sıfırla.
