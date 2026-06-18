@@ -1905,7 +1905,14 @@ class EntegreTasarimPaneli(QWidget):
         self._gl._on_scene_rebuild = None
 
     def _on_gl_scene_rebuild(self) -> None:
-        """_MachineGLView._rebuild_scene() tetiklediğinde renderer'ları teardown."""
+        """_MachineGLView._rebuild_scene() tetiklediğinde renderer'ları teardown.
+
+        S4.6.4: Callback referansı hemen None yapılır. Böylece teardown sırasında
+        sahne yeniden tetiklenirse çifte teardown döngüsü oluşmaz.
+        """
+        gl = getattr(self, '_gl', None)
+        if gl is not None:
+            gl._on_scene_rebuild = None
         for r in self._renderers:
             try:
                 r.teardown()
