@@ -127,6 +127,23 @@ def _cyl_mesh(x0, x1, r, n=40, color=(0.5, 0.6, 0.7, 0.55)):
     return gl.GLMeshItem(meshdata=md, color=color, smooth=True, drawEdges=False)
 
 
+def _cyl_mesh_data(x0: float, x1: float, r: float, n: int = 48) -> gl.MeshData:
+    """Silindir MeshData üret — mevcut GLMeshItem'ı güncellemek için."""
+    th = np.linspace(0, 2 * np.pi, n, endpoint=False, dtype=np.float32)
+    y_r = r * np.cos(th)
+    z_r = r * np.sin(th)
+    v = np.vstack([
+        np.column_stack([np.full(n, float(x0), dtype=np.float32), y_r, z_r]),
+        np.column_stack([np.full(n, float(x1), dtype=np.float32), y_r, z_r]),
+    ])
+    f = []
+    for i in range(n):
+        j = (i + 1) % n
+        f.append([i, j, n + j])
+        f.append([i, n + j, n + i])
+    return gl.MeshData(vertexes=v, faces=np.array(f, dtype=np.int32))
+
+
 def _disc_mesh(x_pos, r, n=40, color=(0.40, 0.50, 0.60, 0.80)):
     """X konumunda dolu disk kapak."""
     th = np.linspace(0, 2*np.pi, n, endpoint=False, dtype=np.float32)
@@ -347,6 +364,67 @@ def _build_carriage_at_zero(R_m: float, L_m: float) -> list:
     return items
 
 
+def _coverage_mesh(coverage, profile) -> "Optional[gl.GLMeshItem]":
+    """CoverageMap → renkli mandrel yüzey mesh (birim: metre).
+
+    Renk şeması: count=0 mavi (boşluk), count=1 yeşil (tek kat),
+    count=2 turuncu, count>2 kırmızı.
+    """
+    try:
+        z_bins  = np.asarray(coverage.z_bins,     dtype=np.float64)
+        th_bins = np.asarray(coverage.theta_bins, dtype=np.float64)
+        counts  = np.asarray(coverage.count,      dtype=np.float32)
+        Nz, Nth = len(z_bins), len(th_bins)
+        if Nz < 2 or Nth < 2:
+            return None
+
+        z_prof = np.asarray(profile.z_mm, dtype=np.float64)
+        r_prof = np.asarray(profile.r_mm, dtype=np.float64)
+        r_at_z = np.interp(z_bins, z_prof, r_prof) / 1000.0   # metre
+        z_center = (z_prof[0] + z_prof[-1]) / 2.0
+        z_m = (z_bins - z_center) / 1000.0
+
+        # (Nz, Nth+1) vertex grid
+        th_ext = np.append(th_bins, th_bins[0])
+        cos_th = np.cos(th_ext)[np.newaxis, :]
+        sin_th = np.sin(th_ext)[np.newaxis, :]
+        r_col  = r_at_z[:, np.newaxis]
+        x_col  = z_m[:, np.newaxis]
+        vx = np.broadcast_to(x_col, (Nz, Nth + 1)).astype(np.float32)
+        vy = (r_col * cos_th).astype(np.float32)
+        vz = (r_col * sin_th).astype(np.float32)
+        verts = np.stack([vx, vy, vz], axis=-1).reshape(-1, 3)
+
+        # Vertex renkleri
+        c = np.zeros((Nz, Nth, 4), dtype=np.float32)
+        c[counts == 0] = [0.10, 0.25, 0.90, 0.65]
+        c[counts == 1] = [0.15, 0.85, 0.30, 0.70]
+        c[counts == 2] = [1.00, 0.60, 0.10, 0.70]
+        c[counts  > 2] = [0.90, 0.10, 0.10, 0.72]
+        vc = np.concatenate([c, c[:, :1, :]], axis=1).reshape(-1, 4)
+
+        # Yüzler
+        stride = Nth + 1
+        i_z  = np.arange(Nz - 1, dtype=np.int32)
+        i_th = np.arange(Nth,     dtype=np.int32)
+        iz, ith = np.meshgrid(i_z, i_th, indexing='ij')
+        iz = iz.ravel(); ith = ith.ravel()
+        v00 = iz * stride + ith
+        v01 = iz * stride + ith + 1
+        v10 = (iz + 1) * stride + ith
+        v11 = (iz + 1) * stride + ith + 1
+        faces = np.concatenate([
+            np.column_stack([v00, v10, v11]),
+            np.column_stack([v00, v11, v01]),
+        ], axis=0).astype(np.int32)
+
+        md = gl.MeshData(vertexes=verts, faces=faces, vertexColors=vc)
+        return gl.GLMeshItem(meshdata=md, smooth=False, drawEdges=False,
+                              glOptions='translucent')
+    except Exception:
+        return None
+
+
 def _path_to_3d_fast(path_points, z_mm_profile, r_mm_profile,
                       ply_thickness_mm: float = 0.0) -> List[np.ndarray]:
     """Vektörize: WindingPoint listesi → kat başına 3D çizgi dizisi (birim: metre).
@@ -432,6 +510,9 @@ class _MachineGLView(gl.GLViewWidget):
         self._ribbon_item           = None  # S4: fiziksel genişlikli tow ribbon (GLMeshItem)
         self._eye_item              = None  # S3: payout gözü işaretçisi (scatter)
         self._delivery_item         = None  # S3: gözden temas noktasına teslim fiberi
+        self._shell_item            = None  # S3: birikmiş fiber kabuğu (katman büyümesi)
+        self._heatmap_item          = None  # S5: kaplama ısı haritası
+        self._shell_last_r_m: float = 0.0
         self._anim_mandrel_angle: float = 0.0
         self._carriage_x_m:  float = 0.0
 
@@ -511,12 +592,13 @@ class _MachineGLView(gl.GLViewWidget):
         self._frame_items.clear()
         self._carriage_items.clear()
         for attr in ('_anim_fiber_item', '_ribbon_item', '_eye_item',
-                     '_delivery_item'):
+                     '_delivery_item', '_shell_item', '_heatmap_item'):
             item = getattr(self, attr, None)
             if item is not None:
                 self.removeItem(item)
                 setattr(self, attr, None)
         self._anim_mandrel_angle = 0.0
+        self._shell_last_r_m = 0.0
         self._carriage_x_m = L / 2.0
 
         # Mandrel — yarı saydam silindir
@@ -631,6 +713,13 @@ class _MachineGLView(gl.GLViewWidget):
                 else:
                     self._delivery_item.setData(pos=seg)
 
+        # 6. S3: Katman büyümesi — fiber kabuk güncelle
+        if surface_r_mm is not None:
+            r_m = float(surface_r_mm) / 1000.0
+            if r_m > self._R_m + 2e-4 and abs(r_m - self._shell_last_r_m) > 5e-5:
+                self._update_fiber_shell(r_m)
+                self._shell_last_r_m = r_m
+
     def _update_ribbon(self, left, right) -> None:
         """S4: Tow ribbon'u mesh strip olarak kur/güncelle.
 
@@ -668,6 +757,31 @@ class _MachineGLView(gl.GLViewWidget):
         else:
             self._ribbon_item.setMeshData(vertexes=verts, faces=faces)
 
+    def _update_fiber_shell(self, r_m: float) -> None:
+        """S3: Birikmiş fiber tabakasını şeffaf silindir kabuğu olarak göster/güncelle."""
+        md = _cyl_mesh_data(0.0, self._L_m, r_m, n=48)
+        if self._shell_item is None:
+            self._shell_item = gl.GLMeshItem(
+                meshdata=md,
+                color=(1.0, 0.78, 0.18, 0.38),
+                smooth=True, drawEdges=False,
+                glOptions='translucent')
+            self.addItem(self._shell_item)
+        else:
+            self._shell_item.setMeshData(meshdata=md)
+
+    def set_coverage_map(self, coverage, profile) -> None:
+        """S5: Kaplama haritasını mandrel yüzeyinde renkli mesh olarak göster."""
+        if self._heatmap_item is not None:
+            self.removeItem(self._heatmap_item)
+            self._heatmap_item = None
+        if coverage is None or profile is None:
+            return
+        item = _coverage_mesh(coverage, profile)
+        if item is not None:
+            self._heatmap_item = item
+            self.addItem(self._heatmap_item)
+
     def clear_simulation_state(self) -> None:
         """Simülasyonu sıfırla: büyüyen fiberi kaldır, mandrel + taşıyıcıyı dinlenme konumuna döndür."""
         for attr in ('_anim_fiber_item', '_ribbon_item', '_eye_item',
@@ -676,6 +790,13 @@ class _MachineGLView(gl.GLViewWidget):
             if item is not None:
                 self.removeItem(item)
                 setattr(self, attr, None)
+        if self._shell_item is not None:
+            self.removeItem(self._shell_item)
+            self._shell_item = None
+        self._shell_last_r_m = 0.0
+        if self._heatmap_item is not None:
+            self.removeItem(self._heatmap_item)
+            self._heatmap_item = None
         for item in self._mandrel_items:
             item.resetTransform()
         self._anim_mandrel_angle = 0.0
@@ -732,8 +853,8 @@ class _ECalcParams:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class _EWorker(QObject):
-    # (path, profile, all_paths, twin, gen)  — twin: TwinSimulationResult | None
-    finished = Signal(object, object, object, object, int)
+    # (path, profile, all_paths, twin, coverage, gen)  — twin: TwinSimulationResult | None
+    finished = Signal(object, object, object, object, object, int)
     error    = Signal(str, int)                      # (msg, gen)
 
     def __init__(self, fn, params: "_ECalcParams", gen: int):
@@ -1678,7 +1799,8 @@ class EntegreTasarimPaneli(QWidget):
                 twin_n_layers += n_l
             first = all_paths[0] if all_paths else None
             twin = self._compute_twin(profile, twin_base_pp, twin_n_layers)
-            return first, profile, all_paths, twin
+            coverage = self._compute_coverage(profile, twin_base_pp, first)
+            return first, profile, all_paths, twin, coverage
 
         # Parametrik mod (katman tablosu boş)
         strat = strat_map.get(params.strategy_text, "helical")
@@ -1691,7 +1813,8 @@ class EntegreTasarimPaneli(QWidget):
         )
         path = generate_path(pp)
         twin = self._compute_twin(profile, pp, params.n_layers)
-        return path, profile, None, twin
+        coverage = self._compute_coverage(profile, pp, path)
+        return path, profile, None, twin, coverage
 
     def _compute_twin(self, profile, base_pp, n_layers):
         """S3: Digital twin simülasyonunu worker thread içinde çalıştır.
@@ -1717,8 +1840,20 @@ class EntegreTasarimPaneli(QWidget):
         except Exception:
             return None
 
-    @Slot(object, object, object, object, int)
-    def _on_calc_done(self, path, profile, all_paths, twin, gen) -> None:
+    def _compute_coverage(self, profile, pp, path):
+        """Arka plan thread'de düşük çözünürlüklü kaplama haritası hesapla."""
+        try:
+            from backend.core.coverage_solver import solve_coverage
+            from backend.core.fiber_band import FiberBand
+            if path is None or pp is None:
+                return None
+            band = FiberBand(tow_width_mm=float(pp.tow_width_mm))
+            return solve_coverage(path, band, profile, n_z=60, n_theta=120)
+        except Exception:
+            return None
+
+    @Slot(object, object, object, object, object, int)
+    def _on_calc_done(self, path, profile, all_paths, twin, coverage, gen) -> None:
         if gen != self._calc_gen:
             return
         self._stop_watchdog()
@@ -1750,6 +1885,9 @@ class EntegreTasarimPaneli(QWidget):
         self._btn_gcode.setEnabled(True)
         # S3: TwinState tabanlı animasyon kur (twin None ise nazikçe devre dışı)
         self._setup_animation(twin, profile)
+        # S5: Kaplama ısı haritasını göster (coverage hesaplandıysa)
+        if coverage is not None:
+            self._gl.set_coverage_map(coverage, profile)
 
     @Slot(str, int)
     def _on_calc_error(self, msg: str, gen: int) -> None:
