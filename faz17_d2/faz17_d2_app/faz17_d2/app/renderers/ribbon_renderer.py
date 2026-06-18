@@ -74,6 +74,14 @@ class RibbonRenderer:
         self._item = None
         self._ready = False
 
+    def reset(self) -> None:
+        """Animasyon sıfırlandığında ribbon'u gizle ve görsel state'i başlangıca döndür."""
+        if self._item is not None:
+            try:
+                self._item.setVisible(False)
+            except Exception:
+                pass
+
     # ── Güncelleme ───────────────────────────────────────────────────────────
 
     def update(self, frame) -> None:
