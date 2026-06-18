@@ -1964,8 +1964,17 @@ class EntegreTasarimPaneli(QWidget):
                 r.update(frame)
             except Exception:
                 pass
+        # S4.5.2: LOD seviyesi + FPS bilgisi etikete eklendi
+        lod = getattr(self, '_lod', None)
+        if lod is not None:
+            lod_label = getattr(lod.current, 'label', '—')
+            fps_val   = lod.fps_measured
+            lod_str   = f"LOD: {lod_label} | FPS: {fps_val:.1f} | "
+        else:
+            lod_str = ""
         self._anim_lbl.setText(
-            f"X: {frame.carriage_x_mm:.1f} mm  |  A: {frame.spindle_angle_deg:.0f}°  |  "
+            f"{lod_str}X: {frame.carriage_x_mm:.1f} mm  |  "
+            f"A: {frame.spindle_angle_deg:.0f}°  |  "
             f"r: {frame.current_radius_mm:.1f} mm  |  {idx}/{n-1}")
 
     def _on_anim_play(self) -> None:
