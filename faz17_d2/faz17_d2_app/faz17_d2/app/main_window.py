@@ -194,7 +194,8 @@ class FilamentWindingApp(QMainWindow):
         self._tabs.addTab(self._panel_uretim,  "Üretim Tasarım Merkezi")
         # ── Üretim & izleme sekmeleri ───────────────────────────────────────
         self._tabs.addTab(self._panel_live,        "Canlı Üretim")
-        self._tabs.addTab(self._panel_3d,          "3D Görüntüleyici")
+        # S6.1: "3D Görüntüleyici" sekmesi kaldırıldı — panel ve sinyaller hayatta
+        # self._tabs.addTab(self._panel_3d,          "3D Görüntüleyici")
         self._tabs.addTab(self._panel_alarms,      "Alarmlar & Güvenlik")
         self._tabs.addTab(self._panel_replay,      "Tekrar Oynat")
         self._tabs.addTab(self._panel_recipe,      "Reçete Düzenleyici")
