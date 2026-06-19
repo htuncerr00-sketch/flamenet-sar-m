@@ -693,3 +693,71 @@ class TestLODRebuild:
 
         # start_idx=1 (MED), tick 1'de level arttı → HIGH (idx=2)
         assert ctrl_lod._idx == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S4.7.6 — scene rebuild callback
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSceneRebuildIntegration:
+
+    def test_it22_scene_rebuild_teardowns_renderers(self):
+        """IT-22: _on_gl_scene_rebuild() tüm renderer'ları teardown eder."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline(n_renderers=3)
+        pipeline.setup_builder(twin, profile)
+
+        trackers = list(pipeline._renderers)
+        pipeline._on_gl_scene_rebuild()
+
+        for r in trackers:
+            assert r.teardown_count == 1, "Teardown bir kez çağrılmalı"
+
+    def test_it23_scene_rebuild_clears_renderers_list(self):
+        """IT-23: _on_gl_scene_rebuild() sonrası _renderers boş."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(twin, profile)
+        pipeline._on_gl_scene_rebuild()
+        assert len(pipeline._renderers) == 0
+
+    def test_it24_callback_cleared_after_rebuild(self):
+        """IT-24: Rebuild sonrası _gl._on_scene_rebuild None olur."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(twin, profile)
+        # setup_builder → _setup_renderers → _gl._on_scene_rebuild atandı
+        assert pipeline._gl._on_scene_rebuild is not None
+        pipeline._on_gl_scene_rebuild()
+        assert pipeline._gl._on_scene_rebuild is None
+
+    def test_it25_double_rebuild_teardown_once(self):
+        """IT-25: İki kez rebuild → teardown bir kez çalışır."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline(n_renderers=2)
+        pipeline.setup_builder(twin, profile)
+
+        trackers = list(pipeline._renderers)
+        pipeline._on_gl_scene_rebuild()   # teardown + clear
+        pipeline._on_gl_scene_rebuild()   # _renderers boş; tekrar çağrı yok
+
+        for r in trackers:
+            assert r.teardown_count == 1, "Teardown ikinci çağrıda artmamalı"
+
+    def test_it26_rebuild_callback_not_called_recursively(self):
+        """IT-26: Rebuild içinde callback yeniden tetiklenmez."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(twin, profile)
+
+        call_count = [0]
+        original_rebuild = pipeline._on_gl_scene_rebuild
+
+        def counting_rebuild():
+            call_count[0] += 1
+            original_rebuild()
+
+        pipeline._gl._on_scene_rebuild = counting_rebuild
+        counting_rebuild()   # 1 kez çağır
+
+        assert call_count[0] == 1, "Callback yalnız 1 kez çalışmalı"
