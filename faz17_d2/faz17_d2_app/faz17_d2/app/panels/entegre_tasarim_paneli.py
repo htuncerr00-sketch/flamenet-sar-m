@@ -1847,7 +1847,7 @@ class EntegreTasarimPaneli(QWidget):
                 self._anim_lbl.setText("Animasyon yok (RenderFrameBuilder bulunamadı).")
                 return
         try:
-            from .renderers import (
+            from ..renderers import (
                 ShellRenderer, HeatmapRenderer, RibbonRenderer,
                 FiberPathRenderer, PayoutEyeRenderer,
             )
@@ -1892,7 +1892,7 @@ class EntegreTasarimPaneli(QWidget):
     def _setup_renderers(self, topology) -> None:
         """Renderer sınıflarını teardown + yeniden setup yap."""
         try:
-            from .renderers import (
+            from ..renderers import (
                 ShellRenderer, HeatmapRenderer, RibbonRenderer,
                 FiberPathRenderer, PayoutEyeRenderer, MachineRenderer,
             )
