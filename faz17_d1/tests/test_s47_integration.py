@@ -616,3 +616,80 @@ class TestDoubleStop:
         pipeline._stop_anim()
         pipeline._stop_anim()
         assert pipeline._builder is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S4.7.5 — LOD rebuild
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestLODRebuild:
+
+    def test_it17_rebuild_creates_new_builder(self):
+        """IT-17: LOD rebuild → yeni builder nesnesi oluşturulur."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline(n_renderers=2)
+        pipeline.setup_builder(twin, profile)
+
+        old_builder = pipeline._builder
+        ctrl_lod = _ControllableLOD(change_at_tick=1)
+        pipeline._lod = ctrl_lod
+
+        pipeline._anim_tick()   # tick 1 → level_changed → rebuild
+
+        assert pipeline._builder is not old_builder, "Yeni builder üretilmeli"
+        assert pipeline._builder is not None
+
+    def test_it18_anim_idx_advances_after_rebuild(self):
+        """IT-18: Rebuild olan tick'ten sonra _anim_idx ilerler."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(twin, profile)
+
+        pipeline._lod = _ControllableLOD(change_at_tick=1)
+
+        pipeline._anim_tick()   # rebuild + adım
+        assert pipeline._anim_idx > 0, "Rebuild tick'inde frame atlanmadı"
+
+    def test_it19_renderers_resetup_after_rebuild(self):
+        """IT-19: Rebuild → renderer'lar yeniden setup edildi."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline(n_renderers=2)
+        pipeline.setup_builder(twin, profile)
+
+        pipeline._lod = _ControllableLOD(change_at_tick=1)
+
+        pipeline._anim_tick()   # rebuild
+
+        # Yeni renderer listesi oluşturulmuş; her biri setup_count=1
+        assert len(pipeline._renderers) == 2
+        for r in pipeline._renderers:
+            assert r.setup_count == 1
+
+    def test_it20_no_rebuild_without_level_change(self):
+        """IT-20: level_changed=False iken builder değişmez."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(twin, profile)
+
+        ctrl_lod = _ControllableLOD(change_at_tick=None)   # asla değişmez
+        pipeline._lod = ctrl_lod
+        old_builder = pipeline._builder
+
+        for _ in range(5):
+            pipeline._anim_tick()
+
+        assert pipeline._builder is old_builder, "Builder değişmemeli"
+
+    def test_it21_lod_idx_changes_on_rebuild(self):
+        """IT-21: Rebuild sonrası _lod seviyesi değişti."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(twin, profile)
+
+        ctrl_lod = _ControllableLOD(change_at_tick=1, start_idx=1)
+        pipeline._lod = ctrl_lod
+
+        pipeline._anim_tick()
+
+        # start_idx=1 (MED), tick 1'de level arttı → HIGH (idx=2)
+        assert ctrl_lod._idx == 2
