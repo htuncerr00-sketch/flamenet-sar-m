@@ -252,3 +252,217 @@ class TestPayoutEyeReset:
         r.update(_EyeFrame())   # update() her iki öğeyi de setVisible(True) yapıyor
         assert eye._visible is True
         assert ray._visible is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S5.3 — **kwargs uyumluluğu: Shell / Ribbon / FiberPath
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestKwargsCompat:
+    """KC-01..09: Tüm renderer reset() imzaları center_x_mm kwarg'ı kabul etmeli."""
+
+    def test_kc01_shell_reset_no_args(self):
+        """KC-01: ShellRenderer.reset() argümansız çalışır."""
+        r = ShellRenderer()
+        v = _View()
+        r.setup(v, _Topology())
+        r.reset()  # TypeError vermemeli
+
+    def test_kc02_shell_reset_with_kwargs(self):
+        """KC-02: ShellRenderer.reset(center_x_mm=...) TypeError vermez."""
+        r = ShellRenderer()
+        v = _View()
+        r.setup(v, _Topology())
+        r.reset(center_x_mm=150.0)
+
+    def test_kc03_shell_reset_hides(self):
+        """KC-03: reset(center_x_mm=...) sonrası item gizlenir."""
+        r = ShellRenderer()
+        v = _View()
+        r.setup(v, _Topology())
+        r.update(_ShellFrame())
+        assert r._item._visible is True
+        r.reset(center_x_mm=150.0)
+        assert r._item._visible is False
+
+    def test_kc04_ribbon_reset_no_args(self):
+        """KC-04: RibbonRenderer.reset() argümansız çalışır."""
+        r = RibbonRenderer()
+        v = _View()
+        r.setup(v, _Topology())
+        r.reset()
+
+    def test_kc05_ribbon_reset_with_kwargs(self):
+        """KC-05: RibbonRenderer.reset(center_x_mm=...) TypeError vermez."""
+        r = RibbonRenderer()
+        v = _View()
+        r.setup(v, _Topology())
+        r.reset(center_x_mm=150.0)
+
+    def test_kc06_ribbon_reset_hides(self):
+        """KC-06: reset(center_x_mm=...) sonrası ribbon item gizlenir."""
+        r = RibbonRenderer()
+        v = _View()
+        r.setup(v, _Topology())
+        r.update(_RibbonFrame())
+        assert r._item._visible is True
+        r.reset(center_x_mm=150.0)
+        assert r._item._visible is False
+
+    def test_kc07_fiberpath_reset_no_args(self):
+        """KC-07: FiberPathRenderer.reset() argümansız çalışır."""
+        r = FiberPathRenderer()
+        v = _View()
+        r.setup(v, _Topology())
+        r.reset()
+
+    def test_kc08_fiberpath_reset_with_kwargs(self):
+        """KC-08: FiberPathRenderer.reset(center_x_mm=...) TypeError vermez."""
+        r = FiberPathRenderer()
+        v = _View()
+        r.setup(v, _Topology())
+        r.reset(center_x_mm=150.0)
+
+    def test_kc09_fiberpath_reset_clears_pts(self):
+        """KC-09: reset(center_x_mm=...) sonrası _pts temizlenir."""
+        r = FiberPathRenderer()
+        v = _View()
+        r.setup(v, _Topology())
+        r.update(_FiberFrame())
+        r.update(_FiberFrame())
+        assert len(r._pts) == 2
+        r.reset(center_x_mm=150.0)
+        assert len(r._pts) == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S5.3 — _stop_anim() loop simülasyonu: tüm renderer'lar birlikte
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestStopAnimLoop:
+    """SA-01..03: _stop_anim() r.reset(center_x_mm=...) çağrısı tüm renderer'larda çalışır."""
+
+    def _make_all(self):
+        renderers = [
+            HeatmapRenderer(),
+            PayoutEyeRenderer(),
+            ShellRenderer(),
+            RibbonRenderer(),
+            FiberPathRenderer(),
+        ]
+        v = _View()
+        top = _Topology()
+        for r in renderers:
+            r.setup(v, top)
+        return renderers, v
+
+    def test_sa01_all_reset_no_exception(self):
+        """SA-01: Tüm renderer'lar r.reset(center_x_mm=150.0) ile exception vermez."""
+        renderers, _ = self._make_all()
+        center_mm = 150.0
+        for r in renderers:
+            if hasattr(r, 'reset'):
+                r.reset(center_x_mm=center_mm)
+
+    def test_sa02_stop_anim_pattern_exact(self):
+        """SA-02: _stop_anim() try/except döngüsünü tam simüle et, exception yoktur."""
+        renderers, _ = self._make_all()
+        center_mm = 150.0
+        exceptions_caught = []
+        for r in renderers:
+            if hasattr(r, 'reset'):
+                try:
+                    r.reset(center_x_mm=center_mm)
+                except Exception as e:
+                    exceptions_caught.append((type(r).__name__, e))
+        assert exceptions_caught == [], f"Beklenmeyen exception'lar: {exceptions_caught}"
+
+    def test_sa03_all_items_hidden_after_stop(self):
+        """SA-03: Animasyon durdurulunca tüm renderer öğeleri gizlenir."""
+        renderers, _ = self._make_all()
+        # Önce görünür yap
+        hm, pe, sh, rb, fp = renderers
+        hm.update(_HmFrame())
+        pe.update(_EyeFrame())
+        sh.update(_ShellFrame())
+        rb.update(_RibbonFrame())
+        fp.update(_FiberFrame())
+        fp.update(_FiberFrame())
+
+        # _stop_anim() simülasyonu
+        center_mm = 150.0
+        for r in renderers:
+            if hasattr(r, 'reset'):
+                r.reset(center_x_mm=center_mm)
+
+        # HeatmapRenderer update() setVisible(True) çağırmaz — setup'tan gelen durum
+        assert pe._eye_item._visible is False
+        assert pe._ray_item._visible is False
+        assert sh._item._visible is False
+        assert rb._item._visible is False
+        assert fp._item._visible is False
+        assert len(fp._pts) == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S5.4 — FiberPathRenderer max_pts cap
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFiberPathMaxPts:
+    """FP-01..06: FiberPathRenderer max_pts parametresi ve trail pruning."""
+
+    def test_fp01_default_max_pts(self):
+        """FP-01: Varsayılan max_pts 10_000'dir."""
+        r = FiberPathRenderer()
+        assert r._max_pts == 10_000
+
+    def test_fp02_custom_max_pts(self):
+        """FP-02: __init__(max_pts=50) doğru ayarlanır."""
+        r = FiberPathRenderer(max_pts=50)
+        assert r._max_pts == 50
+
+    def test_fp03_pts_not_exceed_max(self):
+        """FP-03: update() çağrıları max_pts'i aşmaz."""
+        r = FiberPathRenderer(max_pts=5)
+        v = _View()
+        r.setup(v, _Topology())
+        for _ in range(20):
+            r.update(_FiberFrame())
+        assert len(r._pts) <= 5
+
+    def test_fp04_pts_keeps_recent(self):
+        """FP-04: Taşma olunca en son noktalar korunur (FIFO kuyruğu)."""
+        r = FiberPathRenderer(max_pts=3)
+        v = _View()
+        r.setup(v, _Topology())
+
+        class _PtFrame:
+            def __init__(self, val):
+                self.contact_xyz = np.array([val, 0.0, 0.0], dtype=np.float32)
+
+        for i in range(5):
+            r.update(_PtFrame(float(i)))
+
+        # Son 3 nokta: [2, 3, 4]
+        assert len(r._pts) == 3
+        assert r._pts[-1][0] == pytest.approx(4.0)
+        assert r._pts[0][0] == pytest.approx(2.0)
+
+    def test_fp05_reset_clears_pts(self):
+        """FP-05: reset() sonrası _pts boşaltılır."""
+        r = FiberPathRenderer(max_pts=5)
+        v = _View()
+        r.setup(v, _Topology())
+        for _ in range(5):
+            r.update(_FiberFrame())
+        assert len(r._pts) == 5
+        r.reset()
+        assert len(r._pts) == 0
+
+    def test_fp06_reset_preserves_max_pts(self):
+        """FP-06: reset() sonrası max_pts değeri korunur."""
+        r = FiberPathRenderer(max_pts=42)
+        v = _View()
+        r.setup(v, _Topology())
+        r.reset()
+        assert r._max_pts == 42

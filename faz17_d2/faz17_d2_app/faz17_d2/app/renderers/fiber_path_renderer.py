@@ -16,11 +16,12 @@ class FiberPathRenderer:
     Ribbon'dan farkı: mesh değil çizgi; LOD bağımsız; referans amaçlı.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_pts: int = 10_000) -> None:
         self._item = None
         self._view = None
         self._ready = False
         self._pts: list = []
+        self._max_pts = max_pts
 
     def setup(self, view, topology) -> None:
         try:
@@ -49,8 +50,11 @@ class FiberPathRenderer:
         self._ready = False
         self._pts = []
 
-    def reset(self) -> None:
-        """Yeni animasyon başında iz geçmişini temizle."""
+    def reset(self, **kwargs) -> None:
+        """Yeni animasyon başında iz geçmişini temizle.
+
+        **kwargs: MachineRenderer uyumlu çağrı imzası için yoksayılır.
+        """
         self._pts = []
         if self._item is not None:
             self._item.setVisible(False)
@@ -61,6 +65,8 @@ class FiberPathRenderer:
             return
         pt = frame.contact_xyz.copy()
         self._pts.append(pt)
+        if len(self._pts) > self._max_pts:
+            self._pts = self._pts[-self._max_pts:]
         if len(self._pts) < 2:
             return
         pts_arr = np.array(self._pts, dtype=np.float32)

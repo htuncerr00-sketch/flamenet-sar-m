@@ -74,8 +74,11 @@ class ShellRenderer:
         self._item = None
         self._ready = False
 
-    def reset(self) -> None:
-        """Animasyon sıfırlandığında kabuğu gizle ve başlangıç durumuna döndür."""
+    def reset(self, **kwargs) -> None:
+        """Animasyon sıfırlandığında kabuğu gizle ve başlangıç durumuna döndür.
+
+        **kwargs: MachineRenderer uyumlu çağrı imzası için yoksayılır.
+        """
         if self._item is not None:
             try:
                 self._item.setVisible(False)
