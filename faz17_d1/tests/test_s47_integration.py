@@ -761,3 +761,63 @@ class TestSceneRebuildIntegration:
         counting_rebuild()   # 1 kez çağır
 
         assert call_count[0] == 1, "Callback yalnız 1 kez çalışmalı"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S4.7.7 — 1000 frame replay
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFrameReplay:
+
+    def test_it27_renderer_count_stable_1000_frames(self):
+        """IT-27: 1000 frame sonrası renderer sayısı sabit kalır."""
+        twin, profile = _twin_and_profile(n=500)
+        n_r = 3
+        pipeline = _AnimPipeline(n_renderers=n_r)
+        pipeline.setup_builder(twin, profile)
+
+        n_states = pipeline._builder.n_states
+        for i in range(1000):
+            pipeline._apply_anim_frame(i % n_states)
+
+        assert len(pipeline._renderers) == n_r
+
+    def test_it28_update_count_matches_frames(self):
+        """IT-28: 1000 frame → her renderer 1001 update (1 setup + 1000 replay)."""
+        twin, profile = _twin_and_profile(n=500)
+        pipeline = _AnimPipeline(n_renderers=2)
+        pipeline.setup_builder(twin, profile)
+
+        trackers = list(pipeline._renderers)
+        n_states = pipeline._builder.n_states
+        n_replay = 1000
+        for i in range(n_replay):
+            pipeline._apply_anim_frame(i % n_states)
+
+        # +1: setup_builder içindeki _apply_anim_frame(0)
+        for r in trackers:
+            assert r.update_count == n_replay + 1, (
+                f"Beklenen {n_replay + 1}, alınan {r.update_count}")
+
+    def test_it29_no_teardown_during_replay(self):
+        """IT-29: Saf replay sırasında teardown çağrılmaz."""
+        twin, profile = _twin_and_profile(n=200)
+        pipeline = _AnimPipeline(n_renderers=2)
+        pipeline.setup_builder(twin, profile)
+
+        trackers = list(pipeline._renderers)
+        for i in range(1000):
+            pipeline._apply_anim_frame(i % 200)
+
+        for r in trackers:
+            assert r.teardown_count == 0, "Replay sırasında teardown olmamalı"
+
+    def test_it30_frame_idx_clamped_correctly(self):
+        """IT-30: n_states'i aşan idx clamp ile geçerli kalır."""
+        twin, profile = _twin_and_profile(n=100)
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(twin, profile)
+
+        # idx=9999 → clamp to n_states-1=99; exception olmamalı
+        pipeline._apply_anim_frame(9999)
+        pipeline._apply_anim_frame(-1)   # idx=-1 → clamp to 0
