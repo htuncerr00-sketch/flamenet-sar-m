@@ -821,3 +821,59 @@ class TestFrameReplay:
         # idx=9999 → clamp to n_states-1=99; exception olmamalı
         pipeline._apply_anim_frame(9999)
         pipeline._apply_anim_frame(-1)   # idx=-1 → clamp to 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S4.7.8 — null twin
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNullTwin:
+
+    def test_it31_null_twin_returns_false(self):
+        """IT-31: setup_builder(None, ...) False döner."""
+        pipeline = _AnimPipeline()
+        result = pipeline.setup_builder(None, None)
+        assert result is False
+
+    def test_it32_builder_none_after_null_twin(self):
+        """IT-32: Null twin → builder None kalır."""
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(None, _MockProfile())
+        assert pipeline._builder is None
+
+    def test_it33_renderers_empty_after_null_twin(self):
+        """IT-33: Null twin → renderer listesi boş."""
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(None, None)
+        assert len(pipeline._renderers) == 0
+
+    def test_it34_empty_states_behaves_like_null(self):
+        """IT-34: twin.states=[] → setup başarısız (False döner)."""
+        from dataclasses import dataclass, field as df
+        @dataclass
+        class EmptyTwin:
+            states: list = df(default_factory=list)
+            n_layers: int = 2
+            base_radius_mm: float = 50.0
+            final_radius_mm: float = 52.0
+            total_fiber_length_mm: float = 0.0
+            max_lag_error_mm: float = 0.0
+            max_spindle_rpm: float = 60.0
+            layer_time_ranges_s: list = df(default_factory=list)
+            final_deposition: object = None
+
+        pipeline = _AnimPipeline()
+        result = pipeline.setup_builder(EmptyTwin(), _MockProfile())
+        assert result is False
+        assert pipeline._builder is None
+
+    def test_it35_valid_setup_after_null_setup(self):
+        """IT-35: Null setup → geçerli setup normal çalışır."""
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(None, None)
+        assert pipeline._builder is None
+
+        twin, profile = _twin_and_profile(n=100)
+        ok = pipeline.setup_builder(twin, profile)
+        assert ok is True
+        assert pipeline._builder is not None
