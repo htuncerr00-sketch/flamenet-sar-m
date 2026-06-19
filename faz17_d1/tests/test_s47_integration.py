@@ -512,6 +512,71 @@ class TestNullBuilderGuard:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# S4.7.4 — trail reset (200 frame sonrası _on_anim_reset)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTrailReset:
+
+    def test_it13_trail_empty_after_reset(self):
+        """IT-13: 200 frame → _on_anim_reset() → trail temizlendi."""
+        twin, profile = _twin_and_profile(n=500)
+        trailed = _TrailedRenderer()
+        pipeline = _AnimPipeline(
+            renderer_factory=lambda: trailed,
+            n_renderers=1,
+        )
+        pipeline.setup_builder(twin, profile)
+
+        for i in range(200):
+            pipeline._apply_anim_frame(i)
+
+        assert len(trailed._pts) > 0, "Trail birikmiş olmalı"
+        accumulated = len(trailed._pts)
+        pipeline._on_anim_reset()
+        # _on_anim_reset: reset() → _pts=[] → _apply_anim_frame(0) → _pts=[1 giriş]
+        # Trail 200'den ≤ 1'e düştü: temizleme başarılı
+        assert len(trailed._pts) < accumulated, "Reset trail birikintisini temizledi"
+        assert len(trailed._pts) <= 1, "Reset sonrası en fazla 1 giriş (frame 0)"
+
+    def test_it14_trail_accumulates_before_reset(self):
+        """IT-14: reset öncesi trail birikiyor."""
+        twin, profile = _twin_and_profile()
+        trailed = _TrailedRenderer()
+        pipeline = _AnimPipeline(renderer_factory=lambda: trailed, n_renderers=1)
+        pipeline.setup_builder(twin, profile)
+        before = len(trailed._pts)
+        for i in range(50):
+            pipeline._apply_anim_frame(i)
+        assert len(trailed._pts) > before
+
+    def test_it15_reset_count_incremented(self):
+        """IT-15: _on_anim_reset() sonrası reset_count artar."""
+        twin, profile = _twin_and_profile()
+        trailed = _TrailedRenderer()
+        pipeline = _AnimPipeline(renderer_factory=lambda: trailed, n_renderers=1)
+        pipeline.setup_builder(twin, profile)
+        assert trailed.reset_count == 0
+        pipeline._on_anim_reset()
+        assert trailed.reset_count == 1
+
+    def test_it16_trail_restarts_after_reset(self):
+        """IT-16: reset sonrası frame uygulamak trail'i yeniden başlatır."""
+        twin, profile = _twin_and_profile()
+        trailed = _TrailedRenderer()
+        pipeline = _AnimPipeline(renderer_factory=lambda: trailed, n_renderers=1)
+        pipeline.setup_builder(twin, profile)
+        for i in range(100):
+            pipeline._apply_anim_frame(i)
+        pipeline._on_anim_reset()
+        # reset() temizler; _apply_anim_frame(0) 1 giriş ekler → toplam 1
+        after_reset = len(trailed._pts)
+        assert after_reset <= 1, f"Reset sonrası maksimum 1 giriş, alınan={after_reset}"
+        # Sonraki frame → trail devam ediyor
+        pipeline._apply_anim_frame(10)
+        assert len(trailed._pts) == after_reset + 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # S4.7.3 — double stop
 # ─────────────────────────────────────────────────────────────────────────────
 
