@@ -72,6 +72,17 @@ class HeatmapRenderer:
         self._item = None
         self._ready = False
 
+    def reset(self, **kwargs) -> None:
+        """Animasyon sıfırlandığında ısı haritasını gizle.
+
+        **kwargs: MachineRenderer uyumlu çağrı imzası için yoksayılır.
+        """
+        if self._item is not None:
+            try:
+                self._item.setVisible(False)
+            except Exception:
+                pass
+
     # ── Güncelleme ───────────────────────────────────────────────────────────
 
     def update(self, frame) -> None:
