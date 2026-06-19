@@ -28,10 +28,11 @@ class FiberPathRenderer:
             import pyqtgraph.opengl as gl
         except ImportError:
             return
+        # S6.11.1: width 1.5→2.5, renk cyan (ribbon sarısından ayrışır)
         self._item = gl.GLLinePlotItem(
             pos=np.zeros((2, 3), dtype=np.float32),
-            color=(0.95, 0.78, 0.12, 0.6),
-            width=1.5,
+            color=(0.35, 0.90, 1.00, 0.85),
+            width=2.5,
             antialias=True,
             mode="line_strip",
         )

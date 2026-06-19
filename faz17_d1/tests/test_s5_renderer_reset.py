@@ -218,12 +218,14 @@ class TestPayoutEyeReset:
         assert callable(PayoutEyeRenderer().reset)
 
     def test_pe02_reset_hides_eye_item(self):
-        """PE-02: reset() _eye_item'ı gizler."""
+        """PE-02: S6.11.1 sonrası _eye_item=None; _ray_item reset() ile gizlenir."""
         r, _, eye, ray = self._make()
+        # S6.11.1: scatter dot kaldırıldı → eye=None
+        assert eye is None, "_eye_item S6.11.1 sonrası None olmalı"
         r.update(_EyeFrame())
-        assert eye._visible is True
+        assert ray._visible is True
         r.reset()
-        assert eye._visible is False
+        assert ray._visible is False
 
     def test_pe03_reset_hides_ray_item(self):
         """PE-03: reset() _ray_item'ı gizler."""
@@ -242,15 +244,17 @@ class TestPayoutEyeReset:
         r, _, eye, ray = self._make()
         r.update(_EyeFrame())
         r.reset(center_x_mm=150.0)
-        assert eye._visible is False
+        # S6.11.1: eye=None; ray gizlenmeli
+        assert eye is None
         assert ray._visible is False
 
     def test_pe06_reset_then_update_restores(self):
-        """PE-06: reset() sonrası update() tekrar görünür yapar."""
+        """PE-06: reset() sonrası update() ray'ı tekrar görünür yapar."""
         r, _, eye, ray = self._make()
         r.reset()
-        r.update(_EyeFrame())   # update() her iki öğeyi de setVisible(True) yapıyor
-        assert eye._visible is True
+        r.update(_EyeFrame())
+        # S6.11.1: eye=None; ray visible=True
+        assert eye is None
         assert ray._visible is True
 
 
@@ -396,7 +400,8 @@ class TestStopAnimLoop:
                 r.reset(center_x_mm=center_mm)
 
         # HeatmapRenderer update() setVisible(True) çağırmaz — setup'tan gelen durum
-        assert pe._eye_item._visible is False
+        # S6.11.1: _eye_item scatter dot kaldırıldı → None
+        assert pe._eye_item is None
         assert pe._ray_item._visible is False
         assert sh._item._visible is False
         assert rb._item._visible is False

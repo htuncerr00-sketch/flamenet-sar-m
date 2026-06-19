@@ -260,7 +260,8 @@ class TestLongRunStress:
         for _ in range(10_000):
             r.update(_EyeFrame())
         assert r._ready is True
-        assert r._eye_item is not None
+        # S6.11.1: _eye_item scatter dot kaldırıldı → None bekleniyor
+        assert r._eye_item is None, "_eye_item scatter dot kaldırıldı, None olmalı"
         assert r._ray_item is not None
 
 

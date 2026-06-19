@@ -1,8 +1,11 @@
 """
 app/renderers/payout_eye_renderer.py — Payout gözü + fiber ray renderer (S4.2.6+)
 ====================================================================================
-PayoutEyeRenderer: payout gözü konumunu scatter, göz→temas bağlantısını line
-olarak çizer.
+PayoutEyeRenderer: göz→temas bağlantısını line olarak çizer.
+
+S6.11.1: GLScatterPlotItem (scatter dot, "pembe nokta") kaldırıldı.
+Göz konumu yalnızca ray çizgisi ile gösterilir; scatter item (_eye_item)
+artık None'dır.
 """
 from __future__ import annotations
 
@@ -26,24 +29,18 @@ class PayoutEyeRenderer:
         except ImportError:
             return
 
-        self._eye_item = gl.GLScatterPlotItem(
-            pos=np.zeros((1, 3), dtype=np.float32),
-            size=14,
-            color=(1.0, 0.4, 0.1, 1.0),
-            pxMode=True,
-        )
-        self._eye_item.setVisible(False)
+        # S6.11.1: scatter dot kaldırıldı
+        self._eye_item = None
 
         self._ray_item = gl.GLLinePlotItem(
             pos=np.zeros((2, 3), dtype=np.float32),
-            color=(1.0, 0.6, 0.2, 0.55),
-            width=1.5,
+            color=(1.0, 0.65, 0.10, 0.80),
+            width=2.5,
             antialias=True,
             mode="line_strip",
         )
         self._ray_item.setVisible(False)
 
-        view.addItem(self._eye_item)
         view.addItem(self._ray_item)
         self._view = view
         self._ready = True

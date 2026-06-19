@@ -333,34 +333,41 @@ def _build_static_frame(R_m: float, L_m: float) -> list:
 def _build_carriage_at_zero(R_m: float, L_m: float) -> list:
     """Taşıyıcı/nozul montajı X=0 merkezli inşa edilir; çağıran translate eder. Birim: metre."""
     items = []
-    car_hw = max(0.055, L_m * 0.070)
-    car_z  = R_m + 0.072
+    car_hw  = max(0.055, L_m * 0.070)
+    car_z   = R_m + 0.072
     rail_y0 = -(R_m + 0.10)
     rail_y1 = rail_y0 - 0.040
-    C_CAR = (0.42, 0.22, 0.14, 1.0)
-    C_ARM = (0.48, 0.26, 0.16, 1.0)
-    C_SPL = (0.68, 0.65, 0.18, 0.92)
-    # Ray sürücüsü
+    C_CAR   = (0.38, 0.40, 0.46, 1.0)   # S6.11.1: daha belirgin gri-mavi
+    C_ARM   = (0.46, 0.48, 0.55, 1.0)
+    C_SPL   = (0.72, 0.68, 0.20, 0.95)  # altın sarısı makara
+    # Ray sürücüsü (S6.11.1: daha belirgin renk)
     items.append(_box_mesh(-car_hw, rail_y1 - 0.020, -car_z,
                             car_hw, rail_y0 + 0.010,  car_z, C_CAR))
     # Dikey kolon
-    col_hw = car_hw * 0.28
+    col_hw = car_hw * 0.30
     col_y1 = rail_y0 + R_m + 0.15
     items.append(_box_mesh(-col_hw, rail_y0, -col_hw, col_hw, col_y1, col_hw, C_ARM))
     # Yatay kol (payout arm)
     arm_y = col_y1
-    arm_z = R_m + 0.035
-    items.append(_box_mesh(-car_hw * 0.50, arm_y,         -arm_z,
-                            car_hw * 0.50, arm_y + 0.020,  arm_z, C_ARM))
-    # Makara (payout head)
+    arm_z  = R_m + 0.035
+    items.append(_box_mesh(-car_hw * 0.55, arm_y,         -arm_z,
+                            car_hw * 0.55, arm_y + 0.022,  arm_z, C_ARM))
+    # Makara/bobin (payout head) — arm üzerinde
     spool_r = 0.028
-    spool_y = arm_y + 0.011
-    items.append(_box_mesh(-0.022, spool_y,               -spool_r,
-                            0.022, spool_y + spool_r * 2,  spool_r, C_SPL))
-    # Fiber kılavuz rod
-    items.append(_box_mesh(-0.004, spool_y + spool_r * 2, -0.004,
-                            0.004, arm_y + R_m + 0.18,     0.004,
-                            (0.70, 0.70, 0.75, 0.60)))
+    spool_y = arm_y + 0.012
+    items.append(_box_mesh(-0.024, spool_y,               -spool_r,
+                            0.024, spool_y + spool_r * 2,  spool_r, C_SPL))
+    # S6.11.1: Fiber kılavuz rod AŞAĞI → mandrel yüzeyine doğru (eski kod yukarı gidiyordu)
+    nozzle_y = R_m + 0.005   # mandrel yüzeyinin hemen üstü
+    guide_y0 = min(nozzle_y, spool_y)
+    guide_y1 = max(nozzle_y, arm_y)
+    items.append(_box_mesh(-0.005, guide_y0, -0.005,
+                            0.005, guide_y1,  0.005,
+                            (0.72, 0.72, 0.78, 0.85)))
+    # S6.11.1: Nozul ucu marker — parlak yeşil, fiber çıkış noktasını işaret eder
+    items.append(_box_mesh(-0.010, nozzle_y - 0.006, -0.010,
+                            0.010, nozzle_y + 0.006,  0.010,
+                            (0.25, 1.00, 0.40, 1.00)))
     return items
 
 
@@ -616,13 +623,13 @@ class _MachineGLView(gl.GLViewWidget):
         self._anim_mandrel_angle = 0.0
         self._carriage_x_m = L / 2.0
 
-        # Mandrel — yarı saydam silindir
-        cyl = _cyl_mesh(0.0, L, R, n=64, color=(0.50, 0.62, 0.76, 0.50))
+        # Mandrel — yarı saydam silindir (S6.11.1: n=96 daha düzgün)
+        cyl = _cyl_mesh(0.0, L, R, n=96, color=(0.50, 0.62, 0.76, 0.55))
         self.addItem(cyl)
         self._mandrel_items.append(cyl)
-        # Kapaklar
+        # Kapaklar (n=56 ile daha düzgün daire)
         for xc in [0.0, L]:
-            cap = _disc_mesh(xc, R, color=(0.42, 0.54, 0.66, 0.70))
+            cap = _disc_mesh(xc, R, n=56, color=(0.42, 0.54, 0.66, 0.72))
             self.addItem(cap)
             self._mandrel_items.append(cap)
         # Döndürme göstergesi: 0° ve 180°'de çizgiler
@@ -692,15 +699,20 @@ class _MachineGLView(gl.GLViewWidget):
         self._carriage_x_m = target
         self.clear_head()
 
+    def reset_camera(self) -> None:
+        """S6.11.4: Kamerayı isometrik başlangıç konumuna sıfırla (public API)."""
+        self._fit_camera(self._R_m, self._L_m)
+
     def _fit_camera(self, R: float, L: float) -> None:
-        dist = max(L * 1.6, R * 8.0)
+        dist = max(L * 1.8, R * 9.0)
         cx = L / 2.0
         try:
             self.opts['center'] = QtGui.QVector3D(cx, 0.0, 0.0)
         except Exception:
             pass
         try:
-            q = QtGui.QQuaternion.fromEulerAngles(-20.0, 0.0, 40.0)
+            # S6.11.4: elevation -25°, azimuth 35° — daha gerçekçi isometrik
+            q = QtGui.QQuaternion.fromEulerAngles(-25.0, 0.0, 35.0)
             self.opts['rotation'] = q
         except Exception:
             pass
@@ -867,6 +879,8 @@ class EntegreTasarimPaneli(QWidget):
         self._undo_stack = None
         self._build_ui()
         self._init_param_tracking()
+        # S6.11.2: Fitil genişliği canlı güncelleme — param tracking'den bağımsız
+        self._sp_tow.valueChanged.connect(self._on_tow_width_changed)
         # S4.3: RenderFrame tabanlı animasyon mimarisi
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(33)  # ~30 FPS
@@ -1130,13 +1144,19 @@ class EntegreTasarimPaneli(QWidget):
         self._btn_reset_anim.setStyleSheet(_S_BTN_PRI)
         self._btn_reset_anim.setEnabled(False)
         self._btn_reset_anim.clicked.connect(self._on_anim_reset)
+        # S6.11.4: Kamera sıfırlama butonu
+        self._btn_reset_cam = QPushButton("📷")
+        self._btn_reset_cam.setStyleSheet(_S_BTN_PRI)
+        self._btn_reset_cam.setToolTip("Kamerayı sıfırla (isometrik başlangıç açısı)")
+        self._btn_reset_cam.clicked.connect(self._on_reset_camera)
         anim_btn_row.addWidget(self._btn_play)
         anim_btn_row.addWidget(self._btn_pause)
         anim_btn_row.addWidget(self._btn_stop_anim)
         anim_btn_row.addWidget(self._btn_reset_anim)
+        anim_btn_row.addWidget(self._btn_reset_cam)
         ga_v.addLayout(anim_btn_row)
 
-        # Hız seçici
+        # Hız seçici + Render kalitesi (S6.11.3 + S6.11.5)
         speed_row = QHBoxLayout()
         speed_lbl = QLabel("Hız:")
         speed_lbl.setStyleSheet(f"color:{COLOR['text_secondary']};font-size:10px;")
@@ -1144,8 +1164,22 @@ class EntegreTasarimPaneli(QWidget):
         self._cb_speed.setStyleSheet(_S_COMBO)
         for s in ["1×", "2×", "5×", "10×"]:
             self._cb_speed.addItem(s)
+        self._cb_speed.setCurrentIndex(2)   # S6.11.3: varsayılan 5× (n=3000 → ~20s)
         speed_row.addWidget(speed_lbl)
         speed_row.addWidget(self._cb_speed)
+
+        # S6.11.5: Render kalite seçici (LOD force)
+        qual_lbl = QLabel("Kalite:")
+        qual_lbl.setStyleSheet(f"color:{COLOR['text_secondary']};font-size:10px;")
+        self._cb_quality = QComboBox()
+        self._cb_quality.setStyleSheet(_S_COMBO)
+        for q in ["Düşük", "Orta", "Yüksek"]:
+            self._cb_quality.addItem(q)
+        self._cb_quality.setCurrentIndex(1)   # Orta
+        self._cb_quality.currentIndexChanged.connect(self._on_render_quality_changed)
+        speed_row.addWidget(qual_lbl)
+        speed_row.addWidget(self._cb_quality)
+
         speed_row.addStretch()
         ga_v.addLayout(speed_row)
 
@@ -2095,6 +2129,58 @@ class EntegreTasarimPaneli(QWidget):
             self._anim_timer.stop()
             self._anim_playing = False
             self._btn_stop_anim.setEnabled(False)
+
+    # ── S6.11: Canlı iyileştirme handler'ları ────────────────────────────────
+
+    def _on_tow_width_changed(self, value: float) -> None:
+        """S6.11.2: Fitil genişliği değiştiğinde RibbonRenderer'ı canlı güncelle.
+
+        Builder yeniden oluşturulur; animasyon durumu korunur.
+        """
+        self._anim_tow_w_mm = float(value)
+        if self._twin_ref is None or self._profile_ref is None or self._topology is None:
+            return
+        try:
+            from backend.core.render_frame_builder import RenderFrameBuilder
+        except ImportError:
+            try:
+                from faz17_d1.core.render_frame_builder import RenderFrameBuilder
+            except ImportError:
+                return
+        was_playing = self._anim_playing
+        if was_playing:
+            self._anim_timer.stop()
+        try:
+            dep = self._last_coverage or getattr(self._twin_ref, 'final_deposition', None)
+            self._builder = RenderFrameBuilder(
+                self._twin_ref, self._profile_ref, self._topology,
+                tow_width_mm=float(value),
+                deposition=dep,
+            )
+            self._apply_anim_frame(self._anim_idx)
+        except Exception:
+            pass
+        if was_playing:
+            self._anim_timer.start()
+
+    def _on_reset_camera(self) -> None:
+        """S6.11.4: Kamera sıfırlama — mandrel merkezine isometrik bakış."""
+        try:
+            self._gl.reset_camera()
+        except Exception:
+            pass
+
+    def _on_render_quality_changed(self, idx: int) -> None:
+        """S6.11.5: Render kalite seçici → LOD force + topology rebuild."""
+        lod = getattr(self, '_lod', None)
+        if lod is None:
+            return
+        # Düşük=0, Orta=1, Yüksek=2 → LOD idx 0, 1, 2
+        try:
+            lod.force_level(idx)
+            self._rebuild_topology()
+        except Exception:
+            pass
 
     # ── G-kod üretimi ─────────────────────────────────────────────────────────
 

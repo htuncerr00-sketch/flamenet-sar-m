@@ -52,13 +52,14 @@ class RibbonRenderer:
         empty_verts = np.zeros((max(2, 2 * self._max_seg), 3), dtype=np.float32)
         empty_faces = np.zeros((max(2, 2 * max(self._max_seg - 1, 1)), 3), dtype=np.int32)
 
+        # S6.11.1: "additive" → "translucent" (çakışma aşırı parlaklığını önler)
         self._item = gl.GLMeshItem(
             vertexes=empty_verts,
             faces=empty_faces,
-            color=(0.95, 0.78, 0.12, 0.85),
+            color=(1.00, 0.82, 0.15, 0.90),
             smooth=False,
             drawEdges=False,
-            glOptions="additive",
+            glOptions="translucent",
         )
         self._item.setVisible(False)
         view.addItem(self._item)

@@ -317,11 +317,13 @@ class TestItemCycleAndVisibility:
         top = _Topology()
         vis = _VisFrame()
 
+        # S6.11.1: PayoutEyeRenderer._eye_item scatter dot kaldırıldı (None).
+        # Görünürlük _ray_item üzerinden kontrol edilir.
         checks = {
             ShellRenderer:     lambda r: r._item._visible,
             RibbonRenderer:    lambda r: r._item._visible,
             FiberPathRenderer: lambda r: r._item._visible,
-            PayoutEyeRenderer: lambda r: r._eye_item._visible,
+            PayoutEyeRenderer: lambda r: r._ray_item._visible,
         }
 
         for cls, get_visible in checks.items():
