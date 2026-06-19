@@ -1879,13 +1879,26 @@ class EntegreTasarimPaneli(QWidget):
             )
             self._setup_renderers(self._topology)
 
-            self._anim_idx = 0
+            # S6.13: Pre-populate FiberPathRenderer with entire contact trail so
+            # the complete fiber path is visible immediately after calculation
+            # (not just after frame-by-frame playback).
+            self._prefill_fiber_trail()
+
+            # S6.13: Clear static GL-line paths — renderers provide richer view.
+            self._gl.clear_fiber_paths()
+
+            # S6.13: Apply frame 0 first so HeatmapRenderer gets its dirty=True
+            # update and shows the final deposition coverage colors. Then apply
+            # the last frame so ShellRenderer + RibbonRenderer show full winding.
+            n_states = self._builder.n_states
+            self._apply_anim_frame(0)   # heatmap_dirty=True here → colors set
+            self._anim_idx = n_states - 1
             self._btn_play.setEnabled(True)
             self._btn_stop_anim.setEnabled(True)
             self._btn_reset_anim.setEnabled(True)
             self._anim_slider.setEnabled(True)
-            self._anim_slider.setValue(0)
-            self._apply_anim_frame(0)
+            self._anim_slider.setValue(1000)
+            self._apply_anim_frame(n_states - 1)  # full coverage state
         except Exception as exc:
             self._anim_lbl.setText(f"Animasyon hazırlanamadı: {exc}")
 
@@ -1930,6 +1943,34 @@ class EntegreTasarimPaneli(QWidget):
 
         self._renderers = std_renderers + [machine_r]
         self._gl._on_scene_rebuild = self._on_gl_scene_rebuild
+
+    def _prefill_fiber_trail(self) -> None:
+        """S6.13: FiberPathRenderer'ı hesap sonrası tüm temas noktalarıyla doldur.
+
+        Builder._contact_xyz zaten batch hesaplanmış (N×3 float32 dizisi);
+        doğrudan alınır — N ayrı build() çağrısına gerek yok.
+        Böylece fiber izi, animasyon oynatılmadan hemen görünür olur.
+        """
+        if self._builder is None:
+            return
+        fpr = next(
+            (r for r in self._renderers
+             if type(r).__name__ == 'FiberPathRenderer'),
+            None,
+        )
+        if fpr is None or not getattr(fpr, '_ready', False):
+            return
+        contact = getattr(self._builder, '_contact_xyz', None)
+        if contact is None or len(contact) < 2:
+            return
+        import numpy as _np
+        max_pts = getattr(fpr, '_max_pts', 10_000)
+        step = max(1, len(contact) // max_pts)
+        pts = _np.ascontiguousarray(contact[::step], dtype=_np.float32)
+        fpr._pts = list(pts)
+        if fpr._item is not None:
+            fpr._item.setVisible(True)
+            fpr._item.setData(pos=pts)
 
     def _teardown_renderers(self) -> None:
         """Tüm renderer'ları GL sahneden kaldır."""
