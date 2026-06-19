@@ -509,3 +509,45 @@ class TestNullBuilderGuard:
         pipeline.setup_builder(twin, profile)
         pipeline._stop_anim()   # ilk stop → builder = None
         pipeline._stop_anim()   # ikinci stop → güvenli
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S4.7.3 — double stop
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDoubleStop:
+
+    def test_it10_teardown_called_exactly_once(self):
+        """IT-10: stop() → stop(); teardown her renderer için yalnız 1 kez çağrılır."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline(n_renderers=3)
+        pipeline.setup_builder(twin, profile)
+
+        trackers = list(pipeline._renderers)
+        pipeline._stop_anim()   # teardown_count = 1; _renderers temizlendi
+
+        for r in trackers:
+            assert r.teardown_count == 1, "İlk stop sonrası teardown=1"
+
+        pipeline._stop_anim()   # ikinci stop — _renderers boş, tekrar teardown YOK
+
+        for r in trackers:
+            assert r.teardown_count == 1, "İkinci stop teardown_count'u artırmamalı"
+
+    def test_it11_renderers_empty_after_double_stop(self):
+        """IT-11: Double stop sonrası _renderers boş kalır."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(twin, profile)
+        pipeline._stop_anim()
+        pipeline._stop_anim()
+        assert len(pipeline._renderers) == 0
+
+    def test_it12_builder_none_after_double_stop(self):
+        """IT-12: Double stop sonrası _builder None kalır."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(twin, profile)
+        pipeline._stop_anim()
+        pipeline._stop_anim()
+        assert pipeline._builder is None
