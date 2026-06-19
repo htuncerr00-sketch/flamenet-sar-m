@@ -471,3 +471,41 @@ class TestBasicLifecycle:
         pipeline = _AnimPipeline(n_renderers=4)
         pipeline.setup_builder(twin, profile)
         assert len(pipeline._renderers) == 4
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S4.7.2 — builder=None guard
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNullBuilderGuard:
+
+    def test_it05_stop_without_builder_no_exception(self):
+        """IT-05: _builder=None iken _stop_anim() exception üretmez."""
+        pipeline = _AnimPipeline()
+        assert pipeline._builder is None
+        pipeline._stop_anim()   # must not raise
+
+    def test_it06_apply_without_builder_no_exception(self):
+        """IT-06: _builder=None iken _apply_anim_frame() exception üretmez."""
+        pipeline = _AnimPipeline()
+        pipeline._apply_anim_frame(0)
+        pipeline._apply_anim_frame(100)
+
+    def test_it07_reset_without_builder_no_exception(self):
+        """IT-07: _builder=None iken _on_anim_reset() exception üretmez."""
+        pipeline = _AnimPipeline()
+        pipeline._on_anim_reset()
+
+    def test_it08_tick_without_builder_returns_false(self):
+        """IT-08: _builder=None iken _anim_tick() False döner."""
+        pipeline = _AnimPipeline()
+        result = pipeline._anim_tick()
+        assert result is False
+
+    def test_it09_double_stop_safe(self):
+        """IT-09: setup → stop → stop; ikinci stop güvenli."""
+        twin, profile = _twin_and_profile()
+        pipeline = _AnimPipeline()
+        pipeline.setup_builder(twin, profile)
+        pipeline._stop_anim()   # ilk stop → builder = None
+        pipeline._stop_anim()   # ikinci stop → güvenli
