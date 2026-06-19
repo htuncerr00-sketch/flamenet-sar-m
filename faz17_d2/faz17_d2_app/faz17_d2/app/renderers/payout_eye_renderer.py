@@ -59,6 +59,18 @@ class PayoutEyeRenderer:
         self._ray_item = None
         self._ready = False
 
+    def reset(self, **kwargs) -> None:
+        """Animasyon sıfırlandığında göz ve ray öğelerini gizle.
+
+        **kwargs: MachineRenderer uyumlu çağrı imzası için yoksayılır.
+        """
+        for item in (self._eye_item, self._ray_item):
+            if item is not None:
+                try:
+                    item.setVisible(False)
+                except Exception:
+                    pass
+
     def update(self, frame) -> None:
         """eye_xyz ve contact_xyz ile göz + ray güncelle."""
         if not self._ready:

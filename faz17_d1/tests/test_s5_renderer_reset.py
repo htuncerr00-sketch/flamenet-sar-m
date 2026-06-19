@@ -201,7 +201,54 @@ class TestHeatmapReset:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# S5.2 — PayoutEyeRenderer.reset()  (S5.2 commit'inde eklenecek)
+# S5.2 — PayoutEyeRenderer.reset()
 # ─────────────────────────────────────────────────────────────────────────────
 
-# placeholder — S5.2 uygulandıktan sonra eklenecek
+class TestPayoutEyeReset:
+
+    def _make(self):
+        r = PayoutEyeRenderer()
+        v = _View()
+        r.setup(v, _Topology())
+        return r, v, r._eye_item, r._ray_item
+
+    def test_pe01_reset_has_method(self):
+        """PE-01: PayoutEyeRenderer sınıfı reset() metoduna sahip."""
+        assert hasattr(PayoutEyeRenderer, "reset")
+        assert callable(PayoutEyeRenderer().reset)
+
+    def test_pe02_reset_hides_eye_item(self):
+        """PE-02: reset() _eye_item'ı gizler."""
+        r, _, eye, ray = self._make()
+        r.update(_EyeFrame())
+        assert eye._visible is True
+        r.reset()
+        assert eye._visible is False
+
+    def test_pe03_reset_hides_ray_item(self):
+        """PE-03: reset() _ray_item'ı gizler."""
+        r, _, eye, ray = self._make()
+        r.update(_EyeFrame())
+        assert ray._visible is True
+        r.reset()
+        assert ray._visible is False
+
+    def test_pe04_reset_without_setup_noop(self):
+        """PE-04: setup yapılmadan reset() exception vermez."""
+        PayoutEyeRenderer().reset()
+
+    def test_pe05_reset_accepts_kwargs(self):
+        """PE-05: reset() center_x_mm kwarg'ı alır, yoksayar."""
+        r, _, eye, ray = self._make()
+        r.update(_EyeFrame())
+        r.reset(center_x_mm=150.0)
+        assert eye._visible is False
+        assert ray._visible is False
+
+    def test_pe06_reset_then_update_restores(self):
+        """PE-06: reset() sonrası update() tekrar görünür yapar."""
+        r, _, eye, ray = self._make()
+        r.reset()
+        r.update(_EyeFrame())   # update() her iki öğeyi de setVisible(True) yapıyor
+        assert eye._visible is True
+        assert ray._visible is True
