@@ -1722,10 +1722,11 @@ class EntegreTasarimPaneli(QWidget):
                 base_profile=profile, band=band, base_params=base_pp,
                 n_layers=n_layers, dt_s=1.0,
             )
-            # Çok fazla durum varsa dt'yi büyüterek yeniden örnekleme yerine
-            # _setup_animation alt-örnekleme yapacak; burada yalnız üretiyoruz.
+            self._twin_last_error = ""
             return result
-        except Exception:
+        except Exception as exc:
+            # S6.2: Hata mesajı saklanır; _setup_builder() bunu gösterir.
+            self._twin_last_error = str(exc)
             return None
 
     def _compute_coverage(self, profile, pp, path):
@@ -1797,7 +1798,9 @@ class EntegreTasarimPaneli(QWidget):
         """
         self._stop_anim()
         if twin is None or not getattr(twin, 'states', None):
-            self._anim_lbl.setText("Animasyon yok (twin hesaplanamadı).")
+            err = getattr(self, '_twin_last_error', '')
+            msg = f"Animasyon yok: {err[:100]}" if err else "Animasyon yok (twin hesaplanamadı)."
+            self._anim_lbl.setText(msg)
             return
         try:
             from backend.core.render_frame_builder import RenderFrameBuilder
@@ -2078,8 +2081,11 @@ class EntegreTasarimPaneli(QWidget):
                 self._cb_speed.currentText().replace("×", "").replace("x", ""))
         except Exception:
             speed = 1
-        base_step = max(1, n // 300)
-        self._anim_idx = min(self._anim_idx + base_step * speed, n - 1)
+        # S6.2: base_step sabitleştirildi. Eski n//300 hesabı çok sayıda durum
+        # varken kareyi atlıyordu (örn. n=3000 → base_step=10). Hız kontrolü
+        # yalnızca _cb_speed seçimiyle yapılır; 10× seçimi ~10 sn animasyon verir.
+        base_step = max(1, speed)
+        self._anim_idx = min(self._anim_idx + base_step, n - 1)
 
         self._apply_anim_frame(self._anim_idx)
         slider_val = int(self._anim_idx / max(1, n - 1) * 1000)
