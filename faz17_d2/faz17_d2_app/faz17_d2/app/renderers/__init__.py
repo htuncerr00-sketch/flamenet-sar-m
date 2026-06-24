@@ -16,6 +16,13 @@ LAYER_COLORS = [
     (0.90, 0.10, 0.10, 1.0),   # 3+: kırmızı
 ]
 
+# ── Serbest fiber geometri yardımcıları (S6.15.1) ────────────────────────────
+from .fiber_geometry import (
+    derive_nozzle_point,
+    sample_quadratic_bezier,
+    free_fiber_curve,
+)
+
 # ── Renderer sınıfları ────────────────────────────────────────────────────────
 from .shell_renderer import ShellRenderer
 from .heatmap_renderer import HeatmapRenderer
@@ -30,6 +37,9 @@ from .deposition_renderer import DepositionRenderer
 
 __all__ = [
     "LAYER_COLORS",
+    "derive_nozzle_point",
+    "sample_quadratic_bezier",
+    "free_fiber_curve",
     "ShellRenderer",
     "HeatmapRenderer",
     "RibbonRenderer",

@@ -22,6 +22,23 @@ except ImportError:
         (1.00, 0.50, 0.10, 1.0), (0.90, 0.10, 0.10, 1.0),
     ]
 
+try:
+    from .fiber_geometry import derive_nozzle_point
+except ImportError:
+    def derive_nozzle_point(eye_xyz, contact_xyz,
+                            standoff_factor=0.7, min_standoff_m=0.030,
+                            lead_factor=0.45):
+        c = np.asarray(contact_xyz, dtype=np.float64).reshape(3)
+        e = np.asarray(eye_xyz, dtype=np.float64).reshape(3)
+        radial = np.array([0.0, c[1], c[2]])
+        r = float(np.linalg.norm(radial))
+        rh = radial / r if r > 1e-9 else np.array([0.0, 1.0, 0.0])
+        if r < 1e-9:
+            r = 0.0
+        standoff = max(standoff_factor * r, min_standoff_m)
+        lead = (1.0 if (e[0] - c[0]) >= 0 else -1.0) * lead_factor * standoff
+        return (c + standoff * rh + np.array([lead, 0.0, 0.0])).astype(np.float32)
+
 
 class NozzleRenderer:
     """
@@ -92,11 +109,18 @@ class NozzleRenderer:
     # ── Güncelleme ───────────────────────────────────────────────────────────
 
     def update(self, frame) -> None:
-        """eye_xyz'e taşı; katman rengini uygula."""
+        """Türetilmiş nozul ucuna taşı; katman rengini uygula.
+
+        S6.15.1: uzak ``eye_xyz`` yerine temas noktasından türetilen nozul ucu
+        kullanılır — crosshair sarım kafasıyla aynı yerde olur.
+        """
         if not self._ready or self._item is None:
             return
 
-        eye = np.array(frame.eye_xyz, dtype=np.float32)   # (3,) writable kopya
+        eye = np.asarray(
+            derive_nozzle_point(frame.eye_xyz, frame.contact_xyz),
+            dtype=np.float32,
+        )   # (3,)
         s = self._SIZE_M
         pos = np.array([
             eye + [-s, 0, 0], eye + [s, 0, 0],
