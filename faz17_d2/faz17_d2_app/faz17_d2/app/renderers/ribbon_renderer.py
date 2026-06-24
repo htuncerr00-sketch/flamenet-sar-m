@@ -24,6 +24,15 @@ except ImportError:
         (1.00, 0.50, 0.10, 1.0), (0.90, 0.10, 0.10, 1.0),
     ]
 
+try:
+    from .fiber_geometry import extrude_ribbon
+except ImportError:
+    def extrude_ribbon(verts, faces, thickness_m):
+        return np.asarray(verts), np.asarray(faces)
+
+# S6.15.3: ribbon radyal kalınlığı (prepreg bandı hacmi) — görsel için belirgin
+RIBBON_THICKNESS_M = 0.0006   # 0.6 mm
+
 
 class RibbonRenderer:
     """
@@ -113,10 +122,13 @@ class RibbonRenderer:
             self._item.setVisible(False)
             return
 
+        # S6.15.3: düz şeridi radyal olarak ötele → hacimli prepreg bandı
+        verts3, faces3 = extrude_ribbon(verts, faces, RIBBON_THICKNESS_M)
+
         layer_color = LAYER_COLORS[min(int(getattr(frame, 'layer', 0)), len(LAYER_COLORS) - 1)]
         try:
             self._item.setColor(layer_color)
         except AttributeError:
             pass   # test mock'ları setColor'ı desteklemeyebilir
         self._item.setVisible(True)
-        self._item.setMeshData(vertexes=verts, faces=faces)
+        self._item.setMeshData(vertexes=verts3, faces=faces3)

@@ -21,6 +21,7 @@ from .fiber_geometry import (
     derive_nozzle_point,
     sample_quadratic_bezier,
     free_fiber_curve,
+    extrude_ribbon,
 )
 
 # ── Renderer sınıfları ────────────────────────────────────────────────────────
@@ -40,6 +41,7 @@ __all__ = [
     "derive_nozzle_point",
     "sample_quadratic_bezier",
     "free_fiber_curve",
+    "extrude_ribbon",
     "ShellRenderer",
     "HeatmapRenderer",
     "RibbonRenderer",

@@ -102,4 +102,59 @@ def free_fiber_curve(eye_xyz, contact_xyz, n: int = 18, bow_factor: float = 0.16
     return sample_quadratic_bezier(nozzle, ctrl, contact, n=n)
 
 
-__all__ = ["derive_nozzle_point", "sample_quadratic_bezier", "free_fiber_curve"]
+def extrude_ribbon(verts, faces, thickness_m: float):
+    """
+    Düz (sıfır kalınlık) ribbon şeridini radyal dışa doğru ötele → hacimli bant.
+
+    Girdi ribbon yapısı (RenderFrameBuilder): verts (2m, 3) iç içe L0,R0,L1,R1,…
+    faces (2*(m-1), 3) quad-şerit üçgenlemesi.
+
+    Çıktı: alt yüzey (orijinal) + üst yüzey (radyal +thickness) + iki kenar duvarı
+    (L ve R) → gerçek prepreg bandı gibi kesit hacmi.
+
+    Panel eksen sözleşmesi: X = eksenel; radyal yön = (0, y, z) normalize.
+
+    Dönüş: (verts2 (4m,3) float32, faces2 (N,3) int32).
+    Geçersiz/boş girdide girdiyi olduğu gibi döndürür.
+    """
+    verts = np.asarray(verts, dtype=np.float32)
+    faces = np.asarray(faces, dtype=np.int32)
+    n = verts.shape[0]
+    if n < 4 or faces.shape[0] == 0 or n % 2 != 0:
+        return verts, faces
+
+    # Radyal dış birim vektör (X ekseni = mandrel ekseni)
+    rad = verts.astype(np.float64).copy()
+    rad[:, 0] = 0.0
+    rnorm = np.linalg.norm(rad, axis=1, keepdims=True)
+    rhat = rad / np.maximum(rnorm, 1e-12)
+    top = (verts.astype(np.float64) + float(thickness_m) * rhat).astype(np.float32)
+
+    verts2 = np.vstack([verts, top])          # (2n, 3): [alt | üst]
+
+    m = n // 2                                 # segment-vertex çifti sayısı
+    i = np.arange(m - 1, dtype=np.int32)       # segment indeksleri
+
+    bottom_f = faces                           # alt yüzey (orijinal sargı)
+    top_f = faces[:, ::-1] + n                 # üst yüzey (ters sargı, +n ofset)
+
+    # L kenar duvarı (çift indeksler: 2i)
+    Lw = np.empty((2 * (m - 1), 3), dtype=np.int32)
+    Lw[0::2] = np.column_stack([2 * i,     2 * i + 2,     2 * i + n])
+    Lw[1::2] = np.column_stack([2 * i + 2, 2 * i + 2 + n, 2 * i + n])
+
+    # R kenar duvarı (tek indeksler: 2i+1)
+    Rw = np.empty((2 * (m - 1), 3), dtype=np.int32)
+    Rw[0::2] = np.column_stack([2 * i + 1, 2 * i + 1 + n, 2 * i + 3])
+    Rw[1::2] = np.column_stack([2 * i + 3, 2 * i + 1 + n, 2 * i + 3 + n])
+
+    faces2 = np.vstack([bottom_f, top_f, Lw, Rw]).astype(np.int32)
+    return verts2, faces2
+
+
+__all__ = [
+    "derive_nozzle_point",
+    "sample_quadratic_bezier",
+    "free_fiber_curve",
+    "extrude_ribbon",
+]
