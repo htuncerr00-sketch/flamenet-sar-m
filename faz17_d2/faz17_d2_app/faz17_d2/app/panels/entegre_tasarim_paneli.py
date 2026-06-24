@@ -737,6 +737,26 @@ class _MachineGLView(gl.GLViewWidget):
         """Ana görünüş — isometrik ile aynı."""
         self._fit_camera(self._R_m, self._L_m)
 
+    def set_camera_focus(self, center_xyz, dist_m: float = None,
+                         elev: float = -22.0, azim: float = 40.0) -> None:
+        """S6.15.5: Verilen dünya noktasına yakın odaklı 3/4 kamera.
+
+        Nozul-odaklı / temas-odaklı presetler için panel tarafından çağrılır;
+        merkez, o anki karenin nozul ucu veya temas noktasıdır.
+        """
+        try:
+            cx, cy, cz = float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])
+        except Exception:
+            return
+        dist = dist_m if dist_m is not None else max(self._R_m * 4.0, 0.06)
+        try:
+            self.opts['center'] = QtGui.QVector3D(cx, cy, cz)
+            self.opts['rotation'] = QtGui.QQuaternion.fromEulerAngles(elev, 0.0, azim)
+            self.opts['distance'] = dist
+            self.update()
+        except Exception:
+            pass
+
     def _fit_camera(self, R: float, L: float) -> None:
         dist = max(L * 1.8, R * 9.0)
         cx = L / 2.0
@@ -1189,19 +1209,27 @@ class EntegreTasarimPaneli(QWidget):
         self._btn_cam_front= QPushButton("Ön")
         self._btn_cam_iso  = QPushButton("İzo")
         self._btn_cam_home = QPushButton("◎")
+        # S6.15.5: nozul-odaklı + temas-odaklı yakın kameralar
+        self._btn_cam_nozzle  = QPushButton("Nozul")
+        self._btn_cam_contact = QPushButton("Temas")
         for _b in (self._btn_cam_top, self._btn_cam_side, self._btn_cam_front,
-                   self._btn_cam_iso, self._btn_cam_home):
+                   self._btn_cam_iso, self._btn_cam_home,
+                   self._btn_cam_nozzle, self._btn_cam_contact):
             _b.setStyleSheet(_S_BTN_PRI)
         self._btn_cam_top.setToolTip("Üstten bakış")
         self._btn_cam_side.setToolTip("Yandan bakış")
         self._btn_cam_front.setToolTip("Önden bakış")
         self._btn_cam_iso.setToolTip("İzometrik bakış")
         self._btn_cam_home.setToolTip("Ev konumu")
+        self._btn_cam_nozzle.setToolTip("Nozul ucuna yakın odak")
+        self._btn_cam_contact.setToolTip("Temas noktasına yakın odak")
         self._btn_cam_top.clicked.connect(self._on_camera_top)
         self._btn_cam_side.clicked.connect(self._on_camera_side)
         self._btn_cam_front.clicked.connect(self._on_camera_front)
         self._btn_cam_iso.clicked.connect(self._on_camera_iso)
         self._btn_cam_home.clicked.connect(self._on_camera_home)
+        self._btn_cam_nozzle.clicked.connect(self._on_camera_nozzle)
+        self._btn_cam_contact.clicked.connect(self._on_camera_contact)
         anim_btn_row.addWidget(self._btn_play)
         anim_btn_row.addWidget(self._btn_pause)
         anim_btn_row.addWidget(self._btn_stop_anim)
@@ -1212,6 +1240,8 @@ class EntegreTasarimPaneli(QWidget):
         anim_btn_row.addWidget(self._btn_cam_front)
         anim_btn_row.addWidget(self._btn_cam_iso)
         anim_btn_row.addWidget(self._btn_cam_home)
+        anim_btn_row.addWidget(self._btn_cam_nozzle)
+        anim_btn_row.addWidget(self._btn_cam_contact)
         ga_v.addLayout(anim_btn_row)
 
         # Hız seçici + Render kalitesi (S6.11.3 + S6.11.5)
@@ -2333,6 +2363,38 @@ class EntegreTasarimPaneli(QWidget):
             self._gl.set_camera_home()
         except Exception:
             pass
+
+    def _focus_camera(self, kind: str) -> None:
+        """S6.15.5: o anki karenin nozul ucu / temas noktasına yakın odak.
+
+        kind: "nozzle" → türetilen nozul ucu, "contact" → temas noktası.
+        """
+        if self._builder is None:
+            return
+        try:
+            frame = self._builder.build(self._anim_idx)
+        except Exception:
+            return
+        center = None
+        if kind == "nozzle":
+            try:
+                from ..renderers.fiber_geometry import derive_nozzle_point
+                center = derive_nozzle_point(frame.eye_xyz, frame.contact_xyz)
+            except Exception:
+                center = frame.eye_xyz
+        else:
+            center = frame.contact_xyz
+        try:
+            dist = max(self._gl._R_m * 3.0, 0.05)
+            self._gl.set_camera_focus(center, dist_m=dist)
+        except Exception:
+            pass
+
+    def _on_camera_nozzle(self) -> None:
+        self._focus_camera("nozzle")
+
+    def _on_camera_contact(self) -> None:
+        self._focus_camera("contact")
 
     def _on_render_quality_changed(self, idx: int) -> None:
         """S6.11.5: Render kalite seçici → LOD force + topology rebuild."""
