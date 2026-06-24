@@ -16,6 +16,14 @@ from __future__ import annotations
 
 import numpy as np
 
+try:
+    from . import LAYER_COLORS
+except ImportError:
+    LAYER_COLORS = [
+        (0.15, 0.85, 0.15, 1.0), (1.00, 0.90, 0.10, 1.0),
+        (1.00, 0.50, 0.10, 1.0), (0.90, 0.10, 0.10, 1.0),
+    ]
+
 
 class RibbonRenderer:
     """
@@ -52,14 +60,14 @@ class RibbonRenderer:
         empty_verts = np.zeros((max(2, 2 * self._max_seg), 3), dtype=np.float32)
         empty_faces = np.zeros((max(2, 2 * max(self._max_seg - 1, 1)), 3), dtype=np.int32)
 
-        # S6.11.1: "additive" → "translucent" (çakışma aşırı parlaklığını önler)
+        # S6.14.2: "opaque" + katman rengine göre dinamik renk (LAYER_COLORS)
         self._item = gl.GLMeshItem(
             vertexes=empty_verts,
             faces=empty_faces,
-            color=(1.00, 0.82, 0.15, 0.90),
+            color=LAYER_COLORS[0],
             smooth=False,
             drawEdges=False,
-            glOptions="translucent",
+            glOptions="opaque",
         )
         self._item.setVisible(False)
         view.addItem(self._item)
@@ -105,5 +113,10 @@ class RibbonRenderer:
             self._item.setVisible(False)
             return
 
+        layer_color = LAYER_COLORS[min(int(getattr(frame, 'layer', 0)), len(LAYER_COLORS) - 1)]
+        try:
+            self._item.setColor(layer_color)
+        except AttributeError:
+            pass   # test mock'ları setColor'ı desteklemeyebilir
         self._item.setVisible(True)
         self._item.setMeshData(vertexes=verts, faces=faces)

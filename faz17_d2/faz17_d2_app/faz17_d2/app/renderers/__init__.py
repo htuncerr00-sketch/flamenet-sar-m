@@ -26,6 +26,7 @@ from .payout_eye_renderer import PayoutEyeRenderer
 from .nozzle_renderer import NozzleRenderer
 from .free_fiber_renderer import FreeFiberRenderer
 from .contact_point_renderer import ContactPointRenderer
+from .deposition_renderer import DepositionRenderer
 
 __all__ = [
     "LAYER_COLORS",
@@ -38,4 +39,5 @@ __all__ = [
     "NozzleRenderer",
     "FreeFiberRenderer",
     "ContactPointRenderer",
+    "DepositionRenderer",
 ]

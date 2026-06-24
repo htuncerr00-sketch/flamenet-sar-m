@@ -46,6 +46,24 @@ _HEATMAP_COLORS = np.array([
 
 HEATMAP_PERIOD = 10   # Her kaç karede bir heatmap_dirty=True
 
+# Kabuk katman renk LUT (S6.14.2): yeşil/sarı/turuncu/kırmızı, alpha=0.65
+_SHELL_LAYER_COLORS = np.array([
+    [0.15, 0.85, 0.15, 0.65],   # 0: yeşil
+    [1.00, 0.90, 0.10, 0.65],   # 1: sarı
+    [1.00, 0.50, 0.10, 0.65],   # 2: turuncu
+    [0.90, 0.10, 0.10, 0.65],   # 3+: kırmızı
+], dtype=np.float32)
+
+# Deposition mesh katman renk LUT (S6.14.2): tam opak, fiber birikimine uygun
+_DEP_LAYER_COLORS = np.array([
+    [0.15, 0.85, 0.15, 1.00],   # 0: yeşil
+    [1.00, 0.90, 0.10, 1.00],   # 1: sarı
+    [1.00, 0.50, 0.10, 1.00],   # 2: turuncu
+    [0.90, 0.10, 0.10, 1.00],   # 3+: kırmızı
+], dtype=np.float32)
+
+DEP_PERIOD = 5   # Her kaç karede bir DepositionRenderer güncellenir
+
 
 def _cyl_shell_verts(
     z0_m: float, L_m: float, r_m: float,
@@ -273,19 +291,13 @@ class RenderFrameBuilder:
                 0.0, self._L_m, r_lyr_mm / 1000.0, nz_s, nth_s,
             )
 
-        # Shell renk LUT: katman derinliğine göre RGBA (sarı → turuncu)
+        # Shell renk LUT: katman indexine göre RGBA (yeşil→sarı→turuncu→kırmızı)
+        # S6.14.2: eski doğrusal interpolasyon (sarı→turuncu, alpha=0.35) kaldırıldı
         self._shell_color_by_layer: dict[int, np.ndarray] = {}
         n_shell = topology.shell_n_verts
         for lyr in unique_layers:
-            t = lyr / max(n_layers - 1, 1)
-            r = 1.0
-            g = float(0.78 - 0.4 * t)
-            b = float(0.18 - 0.18 * t)
-            colors = np.tile(
-                np.array([r, g, b, 0.35], dtype=np.float32),
-                (n_shell, 1),
-            )
-            self._shell_color_by_layer[lyr] = colors
+            c = _SHELL_LAYER_COLORS[min(lyr, len(_SHELL_LAYER_COLORS) - 1)]
+            self._shell_color_by_layer[lyr] = np.tile(c, (n_shell, 1))
 
         # ── Heatmap vertex renkleri (sabit) ──────────────────────────────────
         dep = deposition if deposition is not None else getattr(twin, 'final_deposition', None)
@@ -296,6 +308,11 @@ class RenderFrameBuilder:
         self._rib_verts_buf = np.zeros((2 * max_seg, 3), dtype=np.float32)
         self._rib_faces_buf = np.zeros((2 * max(max_seg - 1, 0), 3), dtype=np.int32)
         self._ribbon_max_seg = max_seg
+
+        # ── Deposition mesh: tüm ribbon trajektoryasının birikimli mesh'i ─────
+        # S6.14.2: DepositionRenderer için — sadece bir kez hesaplanır
+        self._dep_verts, self._dep_faces, self._dep_colors = \
+            self._build_dep_mesh()
 
     # ── Ön hesap: ribbon kenarları ───────────────────────────────────────────
 
@@ -349,6 +366,50 @@ class RenderFrameBuilder:
         left  = (P + self._tow_half_m * w).astype(np.float32)
         right = (P - self._tow_half_m * w).astype(np.float32)
         return left, right
+
+    # ── Deposition mesh ön-hesabı (S6.14.2) ─────────────────────────────────
+
+    def _build_dep_mesh(self):
+        """
+        Tüm ribbon trajektoryasını birikimli mesh olarak önceden hesapla.
+
+        Çıktı:
+          dep_verts  (2N, 3) float32 — L[0],R[0], L[1],R[1], …
+          dep_faces  (2*(N-1), 3) int32 — tam yüz dizisi (kare=2 üçgen)
+          dep_colors (2N, 4) float32 — katmana göre RGBA (DEP_LAYER_COLORS)
+
+        Eğer ribbon kenarları hesaplanamadıysa (None, None, None) döner.
+        """
+        if self._ribbon_L is None or self._ribbon_R is None:
+            return None, None, None
+
+        N = self._n_states
+        if N < 2:
+            return None, None, None
+
+        # Vertexler: L ve R iç içe geçmiş
+        dep_verts = np.empty((2 * N, 3), dtype=np.float32)
+        dep_verts[0::2] = self._ribbon_L   # çift indeks = L
+        dep_verts[1::2] = self._ribbon_R   # tek indeks = R
+
+        # Yüzler: N-1 quad = 2*(N-1) üçgen (vektörel)
+        k_idx = np.arange(N - 1, dtype=np.int32)
+        a = 2 * k_idx        # L[k]
+        b = 2 * k_idx + 1    # R[k]
+        c = 2 * k_idx + 2    # L[k+1]
+        d = 2 * k_idx + 3    # R[k+1]
+        dep_faces = np.empty((2 * (N - 1), 3), dtype=np.int32)
+        dep_faces[0::2] = np.column_stack([a, b, c])
+        dep_faces[1::2] = np.column_stack([c, b, d])
+
+        # Renkler: katmana göre (vektörel)
+        layer_clamped = np.clip(self._layer, 0, len(_DEP_LAYER_COLORS) - 1)
+        per_state_colors = _DEP_LAYER_COLORS[layer_clamped]   # (N, 4)
+        dep_colors = np.empty((2 * N, 4), dtype=np.float32)
+        dep_colors[0::2] = per_state_colors   # L vertex rengi
+        dep_colors[1::2] = per_state_colors   # R vertex rengi
+
+        return dep_verts, dep_faces, dep_colors
 
     # ── Ana build ────────────────────────────────────────────────────────────
 
@@ -479,4 +540,5 @@ class RenderFrameBuilder:
 __all__ = [
     "RenderFrameBuilder",
     "HEATMAP_PERIOD",
+    "DEP_PERIOD",
 ]

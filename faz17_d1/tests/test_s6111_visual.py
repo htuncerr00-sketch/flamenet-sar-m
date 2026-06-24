@@ -44,9 +44,9 @@ class TestVisualImprovements:
             "setup() içinde GLScatterPlotItem hâlâ var — scatter dot kaldırılmamış."
         )
 
-    def test_VI04_ribbon_translucent(self):
+    def test_VI04_ribbon_not_additive(self):
+        # S6.14.2: glOptions "translucent"→"opaque" (daha iyi görünürlük)
         src = _RR.read_text(encoding="utf-8")
-        assert '"translucent"' in src, "RibbonRenderer glOptions='translucent' bulunamadı."
         # Yalnızca aktif kod satırlarında (yorum/docstring satırları hariç) additive olmamalı
         active = "\n".join(
             ln for ln in src.splitlines()
@@ -54,6 +54,9 @@ class TestVisualImprovements:
             and not ln.lstrip().startswith("'")
         )
         assert '"additive"' not in active, "RibbonRenderer aktif kodunda hâlâ 'additive' var."
+        assert '"opaque"' in active or '"translucent"' in active, (
+            "RibbonRenderer glOptions 'opaque' veya 'translucent' olmak zorunda."
+        )
 
     def test_VI05_fiber_path_width(self):
         src = _FP.read_text(encoding="utf-8")

@@ -14,7 +14,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import LAYER_COLORS
+try:
+    from . import LAYER_COLORS
+except ImportError:
+    LAYER_COLORS = [
+        (0.15, 0.85, 0.15, 1.0), (1.00, 0.90, 0.10, 1.0),
+        (1.00, 0.50, 0.10, 1.0), (0.90, 0.10, 0.10, 1.0),
+    ]
 
 
 class ContactPointRenderer:

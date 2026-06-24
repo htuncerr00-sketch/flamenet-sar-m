@@ -1851,6 +1851,7 @@ class EntegreTasarimPaneli(QWidget):
                 ShellRenderer, HeatmapRenderer, RibbonRenderer,
                 FiberPathRenderer, PayoutEyeRenderer,
                 NozzleRenderer, FreeFiberRenderer, ContactPointRenderer,
+                DepositionRenderer,
             )
         except ImportError:
             self._anim_lbl.setText("Animasyon yok (renderer modülleri bulunamadı).")
@@ -1885,6 +1886,9 @@ class EntegreTasarimPaneli(QWidget):
             # (not just after frame-by-frame playback).
             self._prefill_fiber_trail()
 
+            # S6.14.2: Load pre-computed deposition mesh into DepositionRenderer.
+            self._setup_dep_renderer()
+
             # S6.13: Clear static GL-line paths — renderers provide richer view.
             self._gl.clear_fiber_paths()
 
@@ -1910,6 +1914,7 @@ class EntegreTasarimPaneli(QWidget):
                 ShellRenderer, HeatmapRenderer, RibbonRenderer,
                 FiberPathRenderer, PayoutEyeRenderer, MachineRenderer,
                 NozzleRenderer, FreeFiberRenderer, ContactPointRenderer,
+                DepositionRenderer,
             )
         except ImportError:
             return
@@ -1926,6 +1931,7 @@ class EntegreTasarimPaneli(QWidget):
             NozzleRenderer(),
             FreeFiberRenderer(),
             ContactPointRenderer(),
+            DepositionRenderer(),
         ]
         for r in std_renderers:
             try:
@@ -1976,6 +1982,23 @@ class EntegreTasarimPaneli(QWidget):
         if fpr._item is not None:
             fpr._item.setVisible(True)
             fpr._item.setData(pos=pts)
+
+    def _setup_dep_renderer(self) -> None:
+        """S6.14.2: DepositionRenderer'a pre-computed deposition mesh verilerini yükle."""
+        if self._builder is None:
+            return
+        dep_r = next(
+            (r for r in self._renderers
+             if type(r).__name__ == 'DepositionRenderer'),
+            None,
+        )
+        if dep_r is None:
+            return
+        dverts  = getattr(self._builder, '_dep_verts',  None)
+        dfaces  = getattr(self._builder, '_dep_faces',  None)
+        dcolors = getattr(self._builder, '_dep_colors', None)
+        if dverts is not None and dfaces is not None and dcolors is not None:
+            dep_r.load_data(dverts, dfaces, dcolors)
 
     def _teardown_renderers(self) -> None:
         """Tüm renderer'ları GL sahneden kaldır."""
