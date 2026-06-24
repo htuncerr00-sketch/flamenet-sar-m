@@ -64,6 +64,12 @@ _DEP_LAYER_COLORS = np.array([
 
 DEP_PERIOD = 5   # Her kaç karede bir DepositionRenderer güncellenir
 
+# S6.15.4: Birikimli deposition mesh'inde katman başına radyal teras yüksekliği.
+# Her katman bir öncekinin üstüne ~1.5 mm kalkar → katmanlar (yeşil/sarı/turuncu/
+# kırmızı) görsel olarak ayrışır, gerçek kalınlık birikimi hissi oluşur ve
+# kabuk/ribbon ile eşdüzlemli kalmadığı için z-fighting giderilir.
+DEP_LAYER_GAP_M = 0.0015
+
 
 def _cyl_shell_verts(
     z0_m: float, L_m: float, r_m: float,
@@ -369,6 +375,21 @@ class RenderFrameBuilder:
 
     # ── Deposition mesh ön-hesabı (S6.14.2) ─────────────────────────────────
 
+    def _radial_offset_by_layer(self, edges: np.ndarray) -> np.ndarray:
+        """
+        Ribbon kenar dizisini (N, 3) katman indeksine göre radyal dışa öteler.
+
+        offset = (layer + 1) · DEP_LAYER_GAP_M  (layer 0 dahi kabuğun üstüne kalkar)
+        Radyal yön: panel X = mandrel ekseni → radyal bileşen (0, y, z) normalize.
+        """
+        e = edges.astype(np.float64).copy()
+        rad = e.copy()
+        rad[:, 0] = 0.0
+        rn = np.linalg.norm(rad, axis=1, keepdims=True)
+        rhat = rad / np.maximum(rn, 1e-12)
+        off = ((self._layer.astype(np.float64) + 1.0) * DEP_LAYER_GAP_M).reshape(-1, 1)
+        return (e + rhat * off).astype(np.float32)
+
     def _build_dep_mesh(self):
         """
         Tüm ribbon trajektoryasını birikimli mesh olarak önceden hesapla.
@@ -387,10 +408,12 @@ class RenderFrameBuilder:
         if N < 2:
             return None, None, None
 
-        # Vertexler: L ve R iç içe geçmiş
+        # Vertexler: L ve R iç içe geçmiş — S6.15.4: katman başına radyal teras
+        L_off = self._radial_offset_by_layer(self._ribbon_L)
+        R_off = self._radial_offset_by_layer(self._ribbon_R)
         dep_verts = np.empty((2 * N, 3), dtype=np.float32)
-        dep_verts[0::2] = self._ribbon_L   # çift indeks = L
-        dep_verts[1::2] = self._ribbon_R   # tek indeks = R
+        dep_verts[0::2] = L_off   # çift indeks = L
+        dep_verts[1::2] = R_off   # tek indeks = R
 
         # Yüzler: N-1 quad = 2*(N-1) üçgen (vektörel)
         k_idx = np.arange(N - 1, dtype=np.int32)
