@@ -1850,6 +1850,7 @@ class EntegreTasarimPaneli(QWidget):
             from ..renderers import (
                 ShellRenderer, HeatmapRenderer, RibbonRenderer,
                 FiberPathRenderer, PayoutEyeRenderer,
+                NozzleRenderer, FreeFiberRenderer, ContactPointRenderer,
             )
         except ImportError:
             self._anim_lbl.setText("Animasyon yok (renderer modülleri bulunamadı).")
@@ -1908,6 +1909,7 @@ class EntegreTasarimPaneli(QWidget):
             from ..renderers import (
                 ShellRenderer, HeatmapRenderer, RibbonRenderer,
                 FiberPathRenderer, PayoutEyeRenderer, MachineRenderer,
+                NozzleRenderer, FreeFiberRenderer, ContactPointRenderer,
             )
         except ImportError:
             return
@@ -1921,6 +1923,9 @@ class EntegreTasarimPaneli(QWidget):
             RibbonRenderer(),
             FiberPathRenderer(),
             PayoutEyeRenderer(),
+            NozzleRenderer(),
+            FreeFiberRenderer(),
+            ContactPointRenderer(),
         ]
         for r in std_renderers:
             try:
