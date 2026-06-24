@@ -703,6 +703,40 @@ class _MachineGLView(gl.GLViewWidget):
         """S6.11.4: Kamerayı isometrik başlangıç konumuna sıfırla (public API)."""
         self._fit_camera(self._R_m, self._L_m)
 
+    # ── S6.14.3: Kamera preset metodları ─────────────────────────────────────
+
+    def _set_cam(self, elev: float, azim: float, dist_factor: float = 2.0) -> None:
+        """Ortak kamera ayar yardımcısı — elevation, azimuth, distance."""
+        cx = self._L_m / 2.0
+        dist = max(self._L_m * dist_factor, self._R_m * 10.0)
+        try:
+            self.opts['center'] = QtGui.QVector3D(cx, 0.0, 0.0)
+            self.opts['rotation'] = QtGui.QQuaternion.fromEulerAngles(elev, 0.0, azim)
+            self.opts['distance'] = dist
+            self.update()
+        except Exception:
+            pass
+
+    def set_camera_top(self) -> None:
+        """Üstten görünüş — mandrel plan görünümü."""
+        self._set_cam(-89.0, 0.0, dist_factor=2.8)
+
+    def set_camera_side(self) -> None:
+        """Yandan görünüş — mandrel profil görünümü (Z yönünden)."""
+        self._set_cam(0.0, 0.0, dist_factor=2.2)
+
+    def set_camera_front(self) -> None:
+        """Önden görünüş — mandrel eksenel (uç) görünümü."""
+        self._set_cam(0.0, 90.0, dist_factor=2.2)
+
+    def set_camera_isometric(self) -> None:
+        """İzometrik görünüş — varsayılan 3/4 açısı."""
+        self._fit_camera(self._R_m, self._L_m)
+
+    def set_camera_home(self) -> None:
+        """Ana görünüş — isometrik ile aynı."""
+        self._fit_camera(self._R_m, self._L_m)
+
     def _fit_camera(self, R: float, L: float) -> None:
         dist = max(L * 1.8, R * 9.0)
         cx = L / 2.0
@@ -883,7 +917,7 @@ class EntegreTasarimPaneli(QWidget):
         self._sp_tow.valueChanged.connect(self._on_tow_width_changed)
         # S4.3: RenderFrame tabanlı animasyon mimarisi
         self._anim_timer = QTimer(self)
-        self._anim_timer.setInterval(33)  # ~30 FPS
+        self._anim_timer.setInterval(16)  # ~60 FPS (S6.14.3)
         self._anim_timer.timeout.connect(self._anim_tick)
         self._anim_idx: int = 0
         self._anim_playing: bool = False
@@ -1149,11 +1183,35 @@ class EntegreTasarimPaneli(QWidget):
         self._btn_reset_cam.setStyleSheet(_S_BTN_PRI)
         self._btn_reset_cam.setToolTip("Kamerayı sıfırla (isometrik başlangıç açısı)")
         self._btn_reset_cam.clicked.connect(self._on_reset_camera)
+        # S6.14.3: Kamera preset butonları
+        self._btn_cam_top  = QPushButton("Üst")
+        self._btn_cam_side = QPushButton("Yan")
+        self._btn_cam_front= QPushButton("Ön")
+        self._btn_cam_iso  = QPushButton("İzo")
+        self._btn_cam_home = QPushButton("◎")
+        for _b in (self._btn_cam_top, self._btn_cam_side, self._btn_cam_front,
+                   self._btn_cam_iso, self._btn_cam_home):
+            _b.setStyleSheet(_S_BTN_PRI)
+        self._btn_cam_top.setToolTip("Üstten bakış")
+        self._btn_cam_side.setToolTip("Yandan bakış")
+        self._btn_cam_front.setToolTip("Önden bakış")
+        self._btn_cam_iso.setToolTip("İzometrik bakış")
+        self._btn_cam_home.setToolTip("Ev konumu")
+        self._btn_cam_top.clicked.connect(self._on_camera_top)
+        self._btn_cam_side.clicked.connect(self._on_camera_side)
+        self._btn_cam_front.clicked.connect(self._on_camera_front)
+        self._btn_cam_iso.clicked.connect(self._on_camera_iso)
+        self._btn_cam_home.clicked.connect(self._on_camera_home)
         anim_btn_row.addWidget(self._btn_play)
         anim_btn_row.addWidget(self._btn_pause)
         anim_btn_row.addWidget(self._btn_stop_anim)
         anim_btn_row.addWidget(self._btn_reset_anim)
         anim_btn_row.addWidget(self._btn_reset_cam)
+        anim_btn_row.addWidget(self._btn_cam_top)
+        anim_btn_row.addWidget(self._btn_cam_side)
+        anim_btn_row.addWidget(self._btn_cam_front)
+        anim_btn_row.addWidget(self._btn_cam_iso)
+        anim_btn_row.addWidget(self._btn_cam_home)
         ga_v.addLayout(anim_btn_row)
 
         # Hız seçici + Render kalitesi (S6.11.3 + S6.11.5)
@@ -2236,6 +2294,38 @@ class EntegreTasarimPaneli(QWidget):
         """S6.11.4: Kamera sıfırlama — mandrel merkezine isometrik bakış."""
         try:
             self._gl.reset_camera()
+        except Exception:
+            pass
+
+    # ── S6.14.3: Kamera preset slotları ─────────────────────────────────────
+
+    def _on_camera_top(self) -> None:
+        try:
+            self._gl.set_camera_top()
+        except Exception:
+            pass
+
+    def _on_camera_side(self) -> None:
+        try:
+            self._gl.set_camera_side()
+        except Exception:
+            pass
+
+    def _on_camera_front(self) -> None:
+        try:
+            self._gl.set_camera_front()
+        except Exception:
+            pass
+
+    def _on_camera_iso(self) -> None:
+        try:
+            self._gl.set_camera_isometric()
+        except Exception:
+            pass
+
+    def _on_camera_home(self) -> None:
+        try:
+            self._gl.set_camera_home()
         except Exception:
             pass
 
