@@ -2284,6 +2284,11 @@ class EntegreTasarimPaneli(QWidget):
                 tow_width_mm=float(value),
                 deposition=dep,
             )
+            # S6.15.2: builder yeniden kuruldu → deposition mesh + fiber izi de
+            # yeni fitil genişliğiyle yenilenmeli (aksi halde dep mesh eski
+            # genişlikte kalırdı — teşhiste tespit edilen latent hata).
+            self._setup_dep_renderer()
+            self._prefill_fiber_trail()
             self._apply_anim_frame(self._anim_idx)
         except Exception:
             pass
